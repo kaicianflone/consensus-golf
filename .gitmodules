@@ -1,0 +1,9 @@
+[submodule "packages/autoresearch"]
+	path = packages/autoresearch
+	url = https://github.com/karpathy/autoresearch.git
+[submodule "packages/consensus-tools"]
+	path = packages/consensus-tools
+	url = https://github.com/consensus-tools/consensus-tools.git
+[submodule "packages/parameter-golf"]
+	path = packages/parameter-golf
+	url = https://github.com/openai/parameter-golf.git
