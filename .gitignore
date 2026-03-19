@@ -1,0 +1,8 @@
+node_modules/
+dist/
+data/precedents.jsonl
+data/audit.jsonl
+data/boards/*.json
+data/boards/*.bak
+data/work/
+.env

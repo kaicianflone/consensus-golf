@@ -1,0 +1,9 @@
+{
+  "repoPath": "./packages/parameter-golf",
+  "trainScript": "train_gpt_mlx.py",
+  "dataPath": "./packages/parameter-golf/data/datasets/fineweb10B_sp1024/",
+  "tokenizerPath": "./packages/parameter-golf/data/tokenizers/fineweb_1024_bpe.model",
+  "vocabSize": 1024,
+  "baselineValBpb": 1.2244,
+  "maxArtifactBytes": 16000000
+}
