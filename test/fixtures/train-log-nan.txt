@@ -1,0 +1,2 @@
+step:1/100 train_loss:6.9408 train_time:24ms step_avg:23.99ms
+step:25/100 train_loss:nan train_time:1200ms step_avg:48.00ms
