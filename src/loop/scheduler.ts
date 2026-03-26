@@ -1,7 +1,5 @@
-import path from 'node:path'
 import type { CycleContext } from './context.js'
 import { runCycle } from './cycle.js'
-import { writeAtomicJson } from '../persistence/atomic-json.js'
 import { getActiveChild, getActiveStdoutBuffer } from '../runner/sandbox.js'
 import { parseMetrics } from '../runner/metrics-parser.js'
 
@@ -13,7 +11,6 @@ export async function runScheduled(
   const { cycles, budgetSeconds } = options
   const startTime = Date.now()
 
-  // 2. Register SIGINT handler
   const sigintHandler = (): void => {
     const child = getActiveChild()
     if (child !== null) {
@@ -24,7 +21,6 @@ export async function runScheduled(
           c.kill('SIGKILL')
         }
       }, 5000)
-      // Avoid blocking process exit
       if (killTimer.unref) killTimer.unref()
     }
 
@@ -48,9 +44,7 @@ export async function runScheduled(
   process.on('SIGINT', sigintHandler)
 
   try {
-    // 3. Loop through cycles sequentially
     for (let i = 1; i <= cycles; i++) {
-      // Check budget before each cycle
       if (budgetSeconds !== undefined) {
         const elapsedSec = (Date.now() - startTime) / 1000
         if (elapsedSec >= budgetSeconds) {
@@ -62,11 +56,6 @@ export async function runScheduled(
       await runCycle(ctx, i, cycles, boardId)
     }
   } finally {
-    // 4. Remove SIGINT listener
     process.removeListener('SIGINT', sigintHandler)
-
-    // 5. Save reputation to data/boards/{boardId}-reputation.json
-    const reputationPath = path.join('data', 'boards', `${boardId}-reputation.json`)
-    writeAtomicJson(reputationPath, ctx.reputation.toJSON())
   }
 }

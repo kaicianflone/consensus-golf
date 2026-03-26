@@ -6,13 +6,11 @@ import type { Judgment } from '../schema/judgment.js'
 import { architectureAgent } from '../agents/architecture.js'
 import { compressionAgent } from '../agents/compression.js'
 import { trainingAgent } from '../agents/training.js'
-import { judgeProposal } from '../judges/proposal-judge.js'
+import { runMultiJudge } from '../judges/judge-personas.js'
 import { judgeResult } from '../judges/result-judge.js'
 import { checkCompliance } from '../judges/compliance-check.js'
-import { applyApprovalPolicy } from '../policy/approval-policy.js'
 import { shouldMerge } from '../policy/merge-policy.js'
 import { runExperiment } from '../runner/sandbox.js'
-import { formatMetricDelta } from './progress.js'
 
 export async function runCycle(
   ctx: CycleContext,
@@ -20,7 +18,7 @@ export async function runCycle(
   totalCycles: number,
   boardId: string,
 ): Promise<void> {
-  const { config, llm, audit, precedents, board, reputation, progress, workDir, dryRun } = ctx
+  const { config, llm, audit, precedents, board, consensus, progress, workDir, dryRun } = ctx
 
   progress.phase(`=== Cycle ${cycleNumber}/${totalCycles} ===`)
   progress.blank()
@@ -44,13 +42,18 @@ export async function runCycle(
   const compPrecedents = precedents.readForAgent('compression')
   const trainPrecedents = precedents.readForAgent('training')
 
-  // Capture reputation scores before this cycle
-  const agentIds = ['architecture', 'compression', 'training']
-  const reputationBefore = new Map<string, number>(
-    agentIds.map((id) => [id, reputation.getScore(id)]),
-  )
+  // Capture balances before cycle
+  const agentIds = config.consensus.agents
+  const balancesBefore = new Map<string, number>()
+  for (const id of agentIds) {
+    try {
+      balancesBefore.set(id, await consensus.getAgentBalance(id))
+    } catch {
+      balancesBefore.set(id, config.consensus.initialCredits)
+    }
+  }
 
-  // 5. Generate proposals concurrently
+  // ─── PHASE 1: Generate proposals ─────────────────────────────────
   progress.phase('Generating proposals...')
   progress.pushIndent()
 
@@ -68,33 +71,23 @@ export async function runCycle(
     const agentName = agentNames[i]
     if (result.status === 'fulfilled') {
       progress.agentResult(agentName, `proposal generated: ${result.value.title}`, true)
-      audit.write(
-        cycleNum,
-        'proposal_created',
-        result.value.id,
-        `${agentName} generated proposal: ${result.value.title}`,
-        { title: result.value.title, category: result.value.category },
-        agentName,
-      )
+      audit.write(cycleNum, 'proposal_created', result.value.id, `${agentName} generated proposal: ${result.value.title}`, { title: result.value.title, category: result.value.category }, agentName)
       validProposals.push(result.value)
     } else {
       progress.agentResult(agentName, `failed: ${String(result.reason)}`, false)
-      reputation.slash(agentName, config.policy.reputation.penalizeInvalid, 'proposal generation failed')
-      audit.write(
-        cycleNum,
-        'proposal_rejected',
-        `${agentName}-cycle-${cycleNum}`,
-        `${agentName} failed to generate proposal: ${String(result.reason)}`,
-        { error: String(result.reason) },
-        agentName,
-      )
+      try {
+        await consensus.slashAgent(agentName, config.consensus.rewards.penalizeInvalid, 'proposal generation failed')
+      } catch (err) {
+        progress.agentResult(agentName, `ledger slash failed: ${String(err)}`, false)
+      }
+      audit.write(cycleNum, 'proposal_rejected', `${agentName}-cycle-${cycleNum}`, `${agentName} failed to generate proposal: ${String(result.reason)}`, { error: String(result.reason) }, agentName)
     }
   }
 
   progress.popIndent()
   progress.blank()
 
-  // 6. Run compliance check concurrently
+  // ─── PHASE 2: Compliance check ───────────────────────────────────
   progress.phase('Checking compliance...')
   progress.pushIndent()
 
@@ -115,19 +108,12 @@ export async function runCycle(
         ? `syntax error: ${compliance.syntaxError ?? 'unknown'}`
         : `security scan blocked: ${compliance.securityScan.blockedPatterns.join(', ')}`
       progress.agentResult(proposal.agent, `compliance failed: ${reason}`, false)
-      reputation.slash(
-        proposal.agent,
-        config.policy.reputation.penalizeNoncompliant,
-        'compliance failure',
-      )
-      audit.write(
-        cycleNum,
-        'proposal_rejected',
-        proposal.id,
-        `Proposal ${proposal.id} rejected: ${reason}`,
-        { reason, syntaxValid: compliance.syntaxValid, securitySafe: compliance.securityScan.safe },
-        proposal.agent,
-      )
+      try {
+        await consensus.slashAgent(proposal.agent, config.consensus.rewards.penalizeNoncompliant, 'compliance failure')
+      } catch (err) {
+        progress.agentResult(proposal.agent, `ledger slash failed: ${String(err)}`, false)
+      }
+      audit.write(cycleNum, 'proposal_rejected', proposal.id, `Proposal ${proposal.id} rejected: ${reason}`, { reason, syntaxValid: compliance.syntaxValid, securitySafe: compliance.securityScan.safe }, proposal.agent)
     }
   }
 
@@ -136,120 +122,85 @@ export async function runCycle(
 
   if (compliantProposals.length === 0) {
     progress.phase('No compliant proposals. Ending cycle.')
+    await printBalanceReport(ctx, agentIds, balancesBefore, cycleNumber, totalCycles)
     return
   }
 
-  // 7. Judge compliant proposals
-  progress.phase('Judging proposals...')
+  // ─── PHASE 3: Post jobs + submit + judge + vote (one job per proposal) ─
+  progress.phase('Evaluating proposals (1 job per proposal, 3 judges each)...')
   progress.pushIndent()
 
+  consensus.clearCycleState()
   const allPrecedents = precedents.readAll()
-  const judgments: Judgment[] = []
 
   for (const proposal of compliantProposals) {
     try {
-      const judgment = await judgeProposal(
-        llm,
-        proposal,
-        boardState,
-        allPrecedents,
-        config.agents.judgeMaxTokens,
-      )
-      const approved = judgment.recommendation === 'approve'
-      progress.agentResult(
-        proposal.agent,
-        `score: ${judgment.compositeScore.toFixed(3)} (${judgment.recommendation})`,
-        approved,
-      )
-      audit.write(
-        cycleNum,
-        'judgment_issued',
-        judgment.id,
-        `Judgment for proposal ${proposal.id}: ${judgment.recommendation} (score: ${judgment.compositeScore.toFixed(3)})`,
-        { proposalId: proposal.id, compositeScore: judgment.compositeScore, recommendation: judgment.recommendation },
-        proposal.agent,
-      )
-      judgments.push(judgment)
+      const jobId = await consensus.postProposalJob(cycleNum, proposal.id)
+
+      const judgments = await runMultiJudge(llm, proposal, boardState, allPrecedents, config.agents.judgeMaxTokens)
+
+      if (judgments.length === 0) {
+        progress.agentResult(proposal.agent, 'all judges failed', false)
+        continue
+      }
+
+      const avgScore = judgments.reduce((sum, j) => sum + j.compositeScore, 0) / judgments.length
+
+      await consensus.submitProposal(proposal.agent, jobId, proposal, avgScore)
+
+      for (const judgment of judgments) {
+        try {
+          await consensus.castJudgmentVote(judgment.judgeId, jobId, proposal.id, judgment)
+        } catch (err) {
+          progress.agentResult(judgment.judgeId, `vote failed: ${String(err)}`, false)
+        }
+      }
+
+      const recommendations = judgments.map((j) => `${j.judgeId}:${j.recommendation}`).join(', ')
+      progress.agentResult(proposal.agent, `avg score: ${avgScore.toFixed(3)} [${recommendations}]`, avgScore > 0.5)
+
+      for (const judgment of judgments) {
+        audit.write(cycleNum, 'judgment_issued', judgment.id, `${judgment.judgeId} judged ${proposal.id}: ${judgment.recommendation} (${judgment.compositeScore.toFixed(3)})`, { proposalId: proposal.id, judgeId: judgment.judgeId, compositeScore: judgment.compositeScore, recommendation: judgment.recommendation }, proposal.agent)
+      }
     } catch (err) {
-      progress.agentResult(proposal.agent, `judging failed: ${String(err)}`, false)
+      progress.agentResult(proposal.agent, `submission/judging failed: ${String(err)}`, false)
     }
   }
 
   progress.popIndent()
   progress.blank()
 
-  // 8. Apply approval policy
-  progress.phase('Applying approval policy...')
+  // ─── PHASE 4: Resolve all proposal jobs ──────────────────────────
+  progress.phase('Resolving consensus...')
   progress.pushIndent()
 
-  const approvedJudgments = applyApprovalPolicy(judgments, {
-    minCompositeScore: config.policy.approval.minCompositeScore,
-    minCompliance: config.policy.approval.minCompliance,
-    maxApprovedPerCycle: config.policy.approval.maxApprovedPerCycle,
-  })
+  const approvedProposalIds = await consensus.resolveAllProposals()
+  const approvedProposals = compliantProposals.filter((p) => approvedProposalIds.includes(p.id))
 
-  const approvedProposalIds = new Set(approvedJudgments.map((j) => j.proposalId))
-
-  for (const judgment of judgments) {
-    const proposal = compliantProposals.find((p) => p.id === judgment.proposalId)
-    if (!proposal) continue
-
-    if (approvedProposalIds.has(judgment.proposalId)) {
+  for (const proposal of compliantProposals) {
+    if (approvedProposalIds.includes(proposal.id)) {
       progress.agentResult(proposal.agent, `approved: ${proposal.title}`, true)
-      audit.write(
-        cycleNum,
-        'proposal_approved',
-        proposal.id,
-        `Proposal ${proposal.id} approved`,
-        { compositeScore: judgment.compositeScore },
-        proposal.agent,
-      )
+      audit.write(cycleNum, 'proposal_approved', proposal.id, `Proposal ${proposal.id} approved by consensus`, {}, proposal.agent)
     } else {
       progress.agentResult(proposal.agent, `rejected: ${proposal.title}`, false)
-      audit.write(
-        cycleNum,
-        'proposal_rejected',
-        proposal.id,
-        `Proposal ${proposal.id} rejected by policy`,
-        { compositeScore: judgment.compositeScore, minRequired: config.policy.approval.minCompositeScore },
-        proposal.agent,
-      )
+      audit.write(cycleNum, 'proposal_rejected', proposal.id, `Proposal ${proposal.id} rejected by consensus`, {}, proposal.agent)
     }
   }
 
   progress.popIndent()
   progress.blank()
 
-  const approvedProposals = compliantProposals.filter((p) => approvedProposalIds.has(p.id))
-
-  // 9. If no approved or dryRun, print report and return
+  // ─── PHASE 5: Execute or dry-run ─────────────────────────────────
   if (approvedProposals.length === 0 || dryRun) {
     if (dryRun) {
       progress.phase('[DRY RUN] Skipping execution of approved proposals.')
     } else {
       progress.phase('No proposals approved for execution.')
     }
-
-    // Print reputation snapshot
-    reputation.recordSnapshot()
-    const leaderboard = reputation.getLeaderboard()
-    const repData = leaderboard.map((entry) => {
-      const before = reputationBefore.get(entry.agentId) ?? entry.score
-      const delta = entry.score - before
-      return {
-        agentId: entry.agentId,
-        score: entry.score,
-        delta,
-        sparkline: reputation.sparkline(entry.agentId),
-      }
-    })
-    progress.phase('Reputation snapshot:')
-    progress.reputation(repData)
-    progress.blank()
+    await printBalanceReport(ctx, agentIds, balancesBefore, cycleNumber, totalCycles)
     return
   }
 
-  // 10. Execute approved proposals sequentially
   progress.phase('Executing approved proposals...')
 
   const updatedBoard = board.load(boardId) ?? boardState
@@ -259,30 +210,12 @@ export async function runCycle(
     progress.phase(`  Running: ${proposal.title} [${proposal.agent}]`)
     progress.pushIndent()
 
-    // Write run_started audit
-    audit.write(
-      cycleNum,
-      'run_started',
-      proposal.id,
-      `Execution started for proposal ${proposal.id}`,
-      { title: proposal.title, agent: proposal.agent },
-      proposal.agent,
-    )
+    audit.write(cycleNum, 'run_started', proposal.id, `Execution started for proposal ${proposal.id}`, { title: proposal.title, agent: proposal.agent }, proposal.agent)
 
     let run
     try {
-      run = await runExperiment(
-        proposal,
-        sourceCode,
-        config.policy,
-        config.pgolf,
-        workDir,
-        (line: string) => {
-          progress.agent(proposal.agent, line)
-        },
-      )
+      run = await runExperiment(proposal, sourceCode, config.policy, config.pgolf, workDir, (line: string) => { progress.agent(proposal.agent, line) })
 
-      // Display metrics with color-coded deltas
       if (run.metrics.valBpb !== undefined) {
         progress.metric('val_bpb', run.metrics.valBpb, updatedBoard.baseline.valBpb)
       }
@@ -293,71 +226,26 @@ export async function runCycle(
         progress.metric('artifact_bytes', run.metrics.artifactBytes, updatedBoard.baseline.artifactBytes)
       }
 
-      // Write run_completed or run_failed audit
       if (run.status === 'passed') {
-        audit.write(
-          cycleNum,
-          'run_completed',
-          run.id,
-          `Run completed for proposal ${proposal.id}: status=${run.status}`,
-          {
-            proposalId: proposal.id,
-            status: run.status,
-            valBpb: run.metrics.valBpb,
-            artifactBytes: run.metrics.artifactBytes,
-          },
-          proposal.agent,
-        )
+        audit.write(cycleNum, 'run_completed', run.id, `Run completed for proposal ${proposal.id}: status=${run.status}`, { proposalId: proposal.id, status: run.status, valBpb: run.metrics.valBpb, artifactBytes: run.metrics.artifactBytes }, proposal.agent)
       } else {
-        audit.write(
-          cycleNum,
-          'run_failed',
-          run.id,
-          `Run failed for proposal ${proposal.id}: status=${run.status}`,
-          { proposalId: proposal.id, status: run.status },
-          proposal.agent,
-        )
+        audit.write(cycleNum, 'run_failed', run.id, `Run failed for proposal ${proposal.id}: status=${run.status}`, { proposalId: proposal.id, status: run.status }, proposal.agent)
       }
     } catch (err) {
       progress.agentResult(proposal.agent, `execution error: ${String(err)}`, false)
-      audit.write(
-        cycleNum,
-        'run_failed',
-        proposal.id,
-        `Execution threw error for proposal ${proposal.id}: ${String(err)}`,
-        { error: String(err) },
-        proposal.agent,
-      )
+      audit.write(cycleNum, 'run_failed', proposal.id, `Execution threw error: ${String(err)}`, { error: String(err) }, proposal.agent)
       progress.popIndent()
       continue
     }
 
-    // Judge result, write precedent, write audit
     try {
       const currentBoard = board.load(boardId) ?? updatedBoard
-      const precedent = await judgeResult(
-        llm,
-        proposal,
-        run,
-        currentBoard,
-        config.agents.judgeMaxTokens,
-      )
+      const precedent = await judgeResult(llm, proposal, run, currentBoard, config.agents.judgeMaxTokens)
       precedents.append(precedent)
-      audit.write(
-        cycleNum,
-        'precedent_created',
-        precedent.id,
-        `Precedent created: [${precedent.outcome}] ${precedent.summary}`,
-        { outcome: precedent.outcome, family: precedent.family, delta: precedent.metrics.delta },
-        proposal.agent,
-      )
+      audit.write(cycleNum, 'precedent_created', precedent.id, `Precedent created: [${precedent.outcome}] ${precedent.summary}`, { outcome: precedent.outcome, family: precedent.family, delta: precedent.metrics.delta }, proposal.agent)
 
-      // Check merge threshold, update board if merged
       const currentBoardState = board.load(boardId) ?? currentBoard
-      if (
-        run.status === 'passed' &&
-        shouldMerge(run.metrics, currentBoardState, config.policy.merge, config.pgolf.maxArtifactBytes)
-      ) {
+      if (run.status === 'passed' && shouldMerge(run.metrics, currentBoardState, config.policy.merge, config.pgolf.maxArtifactBytes)) {
         board.updateBest(boardId, {
           valBpb: run.metrics.valBpb!,
           artifactBytes: run.metrics.artifactBytes ?? currentBoardState.currentBest.artifactBytes,
@@ -365,37 +253,22 @@ export async function runCycle(
           proposalId: proposal.id,
         })
         progress.agentResult(proposal.agent, 'MERGED: new best result!', true)
-        audit.write(
-          cycleNum,
-          'baseline_updated',
-          boardId,
-          `Board updated with new best from proposal ${proposal.id}`,
-          { valBpb: run.metrics.valBpb, artifactBytes: run.metrics.artifactBytes, proposalId: proposal.id },
-          proposal.agent,
-        )
+        audit.write(cycleNum, 'baseline_updated', boardId, `Board updated with new best from proposal ${proposal.id}`, { valBpb: run.metrics.valBpb, artifactBytes: run.metrics.artifactBytes, proposalId: proposal.id }, proposal.agent)
 
-        // Update reputation: reward merge
-        reputation.payout(proposal.agent, config.policy.reputation.rewardMerge, 'merge accepted')
+        try {
+          await consensus.rewardAgent(proposal.agent, config.consensus.rewards.merge, 'merge accepted')
+        } catch (err) {
+          progress.agentResult(proposal.agent, `ledger reward failed: ${String(err)}`, false)
+        }
       } else {
-        // Update reputation based on outcome
-        if (precedent.outcome === 'positive') {
-          reputation.payout(
-            proposal.agent,
-            config.policy.reputation.rewardUsefulNegative,
-            'useful result (positive but not merged)',
-          )
-        } else if (precedent.outcome === 'negative') {
-          reputation.payout(
-            proposal.agent,
-            config.policy.reputation.rewardUsefulNegative,
-            'useful negative result',
-          )
-        } else if (precedent.outcome === 'invalid') {
-          reputation.slash(
-            proposal.agent,
-            config.policy.reputation.penalizeInvalid,
-            'invalid experiment result',
-          )
+        try {
+          if (precedent.outcome === 'positive' || precedent.outcome === 'negative') {
+            await consensus.rewardAgent(proposal.agent, config.consensus.rewards.usefulResult, `useful ${precedent.outcome} result`)
+          } else if (precedent.outcome === 'invalid') {
+            await consensus.slashAgent(proposal.agent, config.consensus.rewards.penalizeInvalid, 'invalid experiment result')
+          }
+        } catch (err) {
+          progress.agentResult(proposal.agent, `ledger update failed: ${String(err)}`, false)
         }
       }
     } catch (err) {
@@ -406,22 +279,34 @@ export async function runCycle(
   }
 
   progress.blank()
+  await printBalanceReport(ctx, agentIds, balancesBefore, cycleNumber, totalCycles)
+}
 
-  // 11. Print cycle report with reputation snapshot and sparklines
-  reputation.recordSnapshot()
-  const leaderboard = reputation.getLeaderboard()
-  const repData = leaderboard.map((entry) => {
-    const before = reputationBefore.get(entry.agentId) ?? entry.score
-    const delta = entry.score - before
-    return {
-      agentId: entry.agentId,
-      score: entry.score,
-      delta,
-      sparkline: reputation.sparkline(entry.agentId),
+async function printBalanceReport(
+  ctx: CycleContext,
+  agentIds: string[],
+  balancesBefore: Map<string, number>,
+  cycleNumber: number,
+  totalCycles: number,
+): Promise<void> {
+  const repData = []
+  for (const agentId of agentIds) {
+    let balance: number
+    try {
+      balance = await ctx.consensus.getAgentBalance(agentId)
+    } catch {
+      balance = balancesBefore.get(agentId) ?? ctx.config.consensus.initialCredits
     }
-  })
+    const before = balancesBefore.get(agentId) ?? balance
+    repData.push({
+      agentId,
+      score: balance,
+      delta: balance - before,
+      sparkline: '',
+    })
+  }
 
-  progress.phase(`Cycle ${cycleNumber}/${totalCycles} complete. Reputation:`)
-  progress.reputation(repData)
-  progress.blank()
+  ctx.progress.phase(`Cycle ${cycleNumber}/${totalCycles} complete. Balances:`)
+  ctx.progress.reputation(repData)
+  ctx.progress.blank()
 }
