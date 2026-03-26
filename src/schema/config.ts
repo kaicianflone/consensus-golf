@@ -1,12 +1,6 @@
 import { z } from 'zod'
 
 export const PolicyConfigSchema = z.object({
-  approval: z.object({
-    minCompositeScore: z.number(),
-    minCompliance: z.number(),
-    maxProposalsPerCycle: z.number(),
-    maxApprovedPerCycle: z.number(),
-  }),
   execution: z.object({
     smokeIterations: z.number(),
     smokeBatchTokens: z.number(),
@@ -18,12 +12,6 @@ export const PolicyConfigSchema = z.object({
     minBpbImprovement: z.number(),
     requireArtifactWithinLimit: z.boolean(),
     archiveNegativeResults: z.boolean(),
-  }),
-  reputation: z.object({
-    rewardMerge: z.number(),
-    rewardUsefulNegative: z.number(),
-    penalizeInvalid: z.number(),
-    penalizeNoncompliant: z.number(),
   }),
 })
 export type PolicyConfig = z.infer<typeof PolicyConfigSchema>

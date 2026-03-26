@@ -1,10 +1,4 @@
 {
-  "approval": {
-    "minCompositeScore": 0.55,
-    "minCompliance": 0.85,
-    "maxProposalsPerCycle": 6,
-    "maxApprovedPerCycle": 2
-  },
   "execution": {
     "smokeIterations": 100,
     "smokeBatchTokens": 4096,
@@ -16,11 +10,5 @@
     "minBpbImprovement": 0.002,
     "requireArtifactWithinLimit": true,
     "archiveNegativeResults": true
-  },
-  "reputation": {
-    "rewardMerge": 5,
-    "rewardUsefulNegative": 2,
-    "penalizeInvalid": -4,
-    "penalizeNoncompliant": -8
   }
 }
