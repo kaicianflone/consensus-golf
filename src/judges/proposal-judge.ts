@@ -3,7 +3,7 @@ import { JudgeResponseSchema, type Judgment } from '../schema/judgment.js'
 import { type Proposal } from '../schema/proposal.js'
 import { type Board } from '../schema/board.js'
 import { type Precedent } from '../schema/precedent.js'
-import { computeCompositeScore } from '../policy/approval-policy.js'
+import { computeCompositeScore } from './score-utils.js'
 import { ulid } from 'ulid'
 
 const SYSTEM_PROMPT = `You are an expert machine learning research judge evaluating proposals to improve a language model.
