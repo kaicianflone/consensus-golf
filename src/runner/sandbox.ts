@@ -109,7 +109,7 @@ export async function runExperiment(
     RUN_ID: runId,
     ITERATIONS: String(policy.execution.smokeIterations),
     TRAIN_BATCH_TOKENS: String(policy.execution.smokeBatchTokens),
-    VAL_LOSS_EVERY: '100',
+    VAL_LOSS_EVERY: '25',
     VAL_BATCH_SIZE: String(policy.execution.valBatchSize),
     MAX_WALLCLOCK_SECONDS: String(policy.execution.smokeMaxWallclockSec),
     DATA_PATH: resolvedDataPath,
