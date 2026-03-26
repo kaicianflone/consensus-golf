@@ -22,7 +22,7 @@ export class AnthropicLlmClient implements LlmClient {
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
-        const response = await this.client.messages.create({
+        const stream = this.client.messages.stream({
           model: this.model,
           max_tokens: maxTokens,
           temperature: this.temperature,
@@ -30,6 +30,7 @@ export class AnthropicLlmClient implements LlmClient {
           messages: [{ role: 'user', content: userMessage }],
         })
 
+        const response = await stream.finalMessage()
         const textBlocks = response.content
           .filter((block): block is Anthropic.TextBlock => block.type === 'text')
           .map((block) => block.text)

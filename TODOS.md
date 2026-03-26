@@ -28,6 +28,23 @@ Local/offline LLM support via Ollama HTTP API at localhost:11434.
 LlmClient interface already supports it. Implementation is straightforward.
 Effort: S | Priority: P2
 
+### Guard Integration for Compliance
+Wrap compliance-check.ts with consensus-tools' GuardEngine.
+Layer code_merge guard type on top of existing py_compile + security scan.
+Gives risk scores, configurable guard policies, and HITL escalation for borderline proposals.
+Effort: M | Priority: P2 | Depends on: consensus-tools lifecycle integration
+
+### Autoresearch Results Ingest
+Parser that reads autoresearch results.tsv + git log and emits consensus-golf Precedent entries.
+Enables knowledge transfer between autoresearch (single-agent hill climbing) and consensus-golf (multi-agent consensus).
+Note: Different platforms (CUDA vs MLX) may not translate directly; val_bpb baselines differ.
+Effort: S | Priority: P2 | Depends on: consensus-tools integration + an autoresearch run
+
+### Balance History Sparklines
+Track per-agent ledger balance history across cycles and render sparklines in progress output.
+Currently deferred in the consensus-tools integration (printBalanceReport returns empty sparklines).
+Effort: S | Priority: P2 | Depends on: consensus-tools lifecycle integration
+
 ## Phase 3
 
 ### Agent Meta-Learning

@@ -1,14 +1,14 @@
 import fs from 'node:fs'
-import path from 'node:path'
-import { PolicyConfigSchema, PgolfConfigSchema, AgentConfigSchema } from '../schema/config.js'
+import { PolicyConfigSchema, PgolfConfigSchema, AgentConfigSchema, ConsensusConfigSchema } from '../schema/config.js'
 import { AnthropicLlmClient } from '../llm/anthropic.js'
 import { AuditWriter } from '../persistence/audit-writer.js'
 import { BoardManager } from '../persistence/board-manager.js'
 import { PrecedentStore } from '../memory/precedent-store.js'
-import { ReputationTracker } from '../policy/reputation.js'
 import { ProgressReporter } from '../loop/progress.js'
 import { runScheduled } from '../loop/scheduler.js'
-import { readAtomicJson } from '../persistence/atomic-json.js'
+import { LocalBoard, createStorage } from '@consensus-tools/core'
+import { ConsensusBridge } from '../adapter/consensus-bridge.js'
+import { buildConsensusToolsConfig } from '../adapter/consensus-config.js'
 import type { CycleContext } from '../loop/context.js'
 
 function parseArgs(): { cycles: number; boardId: string; dryRun: boolean; budgetSeconds?: number } {
@@ -37,42 +37,49 @@ function parseArgs(): { cycles: number; boardId: string; dryRun: boolean; budget
 async function main(): Promise<void> {
   const { cycles, boardId, dryRun, budgetSeconds } = parseArgs()
 
-  // Load and validate configs
   const policyRaw = JSON.parse(fs.readFileSync('config/default-policy.json', 'utf8'))
   const pgolfRaw = JSON.parse(fs.readFileSync('config/pgolf.json', 'utf8'))
   const agentsRaw = JSON.parse(fs.readFileSync('config/agents.json', 'utf8'))
+  const consensusRaw = JSON.parse(fs.readFileSync('config/consensus.json', 'utf8'))
 
   const policy = PolicyConfigSchema.parse(policyRaw)
   const pgolf = PgolfConfigSchema.parse(pgolfRaw)
   const agents = AgentConfigSchema.parse(agentsRaw)
+  const consensusConfig = ConsensusConfigSchema.parse(consensusRaw)
 
-  // Create dependencies
   const llm = new AnthropicLlmClient(agents.model, agents.temperature)
+
+  // Create consensus-tools LocalBoard
+  const ctConfig = buildConsensusToolsConfig(consensusConfig)
+  const storage = await createStorage(ctConfig)
+  const localBoard = new LocalBoard(ctConfig, storage)
+  await localBoard.init()
+
+  // Seed agent and judge credits
+  for (const agentId of consensusConfig.agents) {
+    await localBoard.ledger.ensureInitialCredits(agentId)
+  }
+  for (const judgeId of consensusConfig.judges) {
+    await localBoard.ledger.ensureInitialCredits(judgeId)
+  }
+
+  const consensus = new ConsensusBridge(localBoard, consensusConfig)
+
   const audit = new AuditWriter('data/audit.jsonl')
   const board = new BoardManager('data/boards')
   const precedents = new PrecedentStore('data/precedents.jsonl')
-  const reputation = new ReputationTracker(['architecture', 'compression', 'training'])
-
-  // Load existing reputation if available
-  const reputationPath = path.join('data', 'boards', `${boardId}-reputation.json`)
-  const existingReputation = readAtomicJson<Record<string, number>>(reputationPath)
-  if (existingReputation !== null) {
-    reputation.loadFromJSON(existingReputation)
-  }
-
   const progress = new ProgressReporter()
 
-  // Ensure data/work directory exists
   fs.mkdirSync('data/work', { recursive: true })
+  fs.mkdirSync('data/consensus', { recursive: true })
 
-  // Build CycleContext
   const ctx: CycleContext = {
-    config: { policy, pgolf, agents },
+    config: { policy, pgolf, agents, consensus: consensusConfig },
     llm,
     audit,
     precedents,
     board,
-    reputation,
+    consensus,
     progress,
     workDir: 'data/work',
     dryRun,
