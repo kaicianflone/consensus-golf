@@ -1,0 +1,4 @@
+packages:
+  - 'packages/consensus-tools/packages/schemas'
+  - 'packages/consensus-tools/packages/guards'
+  - 'packages/consensus-tools/packages/core'
