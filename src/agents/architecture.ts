@@ -9,7 +9,7 @@ import { buildAgentContext, buildAgentSystemPrompt } from './context.js'
 
 const SYSTEM_PROMPT = buildAgentSystemPrompt(
   'ArchitectureAgent',
-  'Model structure changes: layer count, dimension, attention head config, weight tying strategies, recurrence, depth sharing, low-rank decompositions. Biased toward parameter efficiency.',
+  'Model architecture tuning via SAFE changes to existing config values. Focus on: DEPTH (layer count), model dimension (n_embd), number of attention heads (n_head, n_kv_head), MLP ratio, window pattern (WINDOW_PATTERN). Change constants at the top of the file — do NOT restructure classes or add new modules. Example: try DEPTH=10 instead of 9, or change HEAD_DIM. Small changes, big impact.',
 )
 
 export async function architectureAgent(

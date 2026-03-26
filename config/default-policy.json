@@ -1,9 +1,9 @@
 {
   "execution": {
-    "smokeIterations": 100,
-    "smokeBatchTokens": 4096,
-    "smokeMaxWallclockSec": 120,
-    "valBatchSize": 4096,
+    "smokeIterations": 200,
+    "smokeBatchTokens": 8192,
+    "smokeMaxWallclockSec": 240,
+    "valBatchSize": 8192,
     "requireSmokeBeforeFull": true
   },
   "merge": {

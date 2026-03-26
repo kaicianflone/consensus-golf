@@ -6,7 +6,7 @@
   "jobExpiresSeconds": 3600,
   "policy": {
     "type": "APPROVAL_VOTE",
-    "quorum": 2,
+    "quorum": 1,
     "minScore": 1,
     "minMargin": 0,
     "weightMode": "equal",
