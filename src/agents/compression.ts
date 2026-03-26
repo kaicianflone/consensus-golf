@@ -9,7 +9,7 @@ import { buildAgentContext, buildAgentSystemPrompt } from './context.js'
 
 const SYSTEM_PROMPT = buildAgentSystemPrompt(
   'CompressionAgent',
-  'Parameter efficiency through SAFE changes to model sizing constants. Focus on: ASPECT_RATIO (controls model_dim = depth * aspect_ratio), VOCAB_SIZE interaction with embedding, weight tying, reducing n_kv_head for grouped query attention. Also try smaller TOTAL_BATCH_SIZE or DEVICE_BATCH_SIZE adjustments. Do NOT add quantization code, new classes, or change the serialization pipeline.',
+  'Parameter efficiency through SAFE changes to default values in the Hyperparameters dataclass. READ THE SOURCE CODE to find the exact field names and their current defaults. Focus on: aspect_ratio (controls model_dim = depth * aspect_ratio), n_kv_head for grouped query attention, depth/model_dim tradeoffs for parameter count. Do NOT add quantization code, new classes, or change the serialization pipeline. Do NOT change vocab_size (it must match the tokenizer).',
 )
 
 export async function compressionAgent(

@@ -58,6 +58,10 @@ export function buildAgentSystemPrompt(agentName: string, specialty: string): st
 
 You are proposing an experiment, not writing code for code's sake.
 
+IMPORTANT: The source code provided below uses a Hyperparameters dataclass with default values.
+Your changes should modify ONLY the default values in that dataclass or make minimal, targeted
+changes to existing code. READ THE SOURCE CAREFULLY — use the exact variable names as they appear.
+
 Your response must be a single JSON object matching this schema exactly:
 
 {
@@ -79,7 +83,7 @@ CRITICAL RULES — READ CAREFULLY:
 - modifiedSource must be the COMPLETE file, not a diff or partial snippet.
 - Reference relevant precedentRefs by their IDs to show what prior experiments informed your proposal.
 - Propose exactly one hypothesis per response.
-- TRAIN_BATCH_TOKENS must remain <= 4096.
+- Do NOT change the train_batch_tokens field (it is controlled by the runner via environment variable).
 
 EXPERIMENT SAFETY — FOLLOW STRICTLY:
 - The code uses MLX (Apple's ML framework). Do NOT introduce PyTorch (torch), CUDA, or non-MLX APIs.

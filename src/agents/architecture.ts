@@ -9,7 +9,7 @@ import { buildAgentContext, buildAgentSystemPrompt } from './context.js'
 
 const SYSTEM_PROMPT = buildAgentSystemPrompt(
   'ArchitectureAgent',
-  'Model architecture tuning via SAFE changes to existing config values. Focus on: DEPTH (layer count), model dimension (n_embd), number of attention heads (n_head, n_kv_head), MLP ratio, window pattern (WINDOW_PATTERN). Change constants at the top of the file — do NOT restructure classes or add new modules. Example: try DEPTH=10 instead of 9, or change HEAD_DIM. Small changes, big impact.',
+  'Model architecture tuning via SAFE changes to default values in the Hyperparameters dataclass. READ THE SOURCE CODE to find the exact field names and their current defaults. Focus on: depth (layer count), model_dim, n_head, n_kv_head, head_dim, window_pattern, train_seq_len. Change ONLY the default values — do NOT add new classes, modules, or layers. Small changes to these values can have big impact on val_bpb.',
 )
 
 export async function architectureAgent(
