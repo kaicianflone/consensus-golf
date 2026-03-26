@@ -47,3 +47,27 @@ export const AgentConfigSchema = z.object({
   temperature: z.number(),
 })
 export type AgentConfig = z.infer<typeof AgentConfigSchema>
+
+export const ConsensusConfigSchema = z.object({
+  storagePath: z.string(),
+  agents: z.array(z.string()),
+  initialCredits: z.number(),
+  stakeRequired: z.number(),
+  jobExpiresSeconds: z.number(),
+  policy: z.object({
+    type: z.string(),
+    quorum: z.number(),
+    minScore: z.number(),
+    minMargin: z.number(),
+    weightMode: z.string(),
+    tieBreak: z.string(),
+  }),
+  rewards: z.object({
+    merge: z.number(),
+    usefulResult: z.number(),
+    penalizeInvalid: z.number(),
+    penalizeNoncompliant: z.number(),
+  }),
+  judges: z.array(z.string()),
+})
+export type ConsensusConfig = z.infer<typeof ConsensusConfigSchema>

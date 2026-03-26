@@ -1,0 +1,22 @@
+{
+  "storagePath": "data/consensus/board.json",
+  "agents": ["architecture", "compression", "training"],
+  "initialCredits": 100,
+  "stakeRequired": 1,
+  "jobExpiresSeconds": 3600,
+  "policy": {
+    "type": "APPROVAL_VOTE",
+    "quorum": 2,
+    "minScore": 1,
+    "minMargin": 0,
+    "weightMode": "equal",
+    "tieBreak": "confidence"
+  },
+  "rewards": {
+    "merge": 5,
+    "usefulResult": 2,
+    "penalizeInvalid": 4,
+    "penalizeNoncompliant": 8
+  },
+  "judges": ["judge-conservative", "judge-innovative", "judge-efficiency"]
+}
