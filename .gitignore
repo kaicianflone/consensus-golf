@@ -8,3 +8,4 @@ data/work/
 data/consensus/
 .env
 .DS_Store
+docs/
