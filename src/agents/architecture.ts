@@ -9,7 +9,7 @@ import { buildAgentContext, buildAgentSystemPrompt } from './context.js'
 
 const SYSTEM_PROMPT = buildAgentSystemPrompt(
   'ArchitectureAgent',
-  'Model structure changes: layer count, dimension, attention head config, weight tying strategies, recurrence, depth sharing, low-rank decompositions. Biased toward parameter efficiency.',
+  'Model architecture tuning via SAFE changes to default values in the Hyperparameters dataclass. READ THE SOURCE CODE to find the exact field names and their current defaults. Focus on: depth (layer count), model_dim, n_head, n_kv_head, head_dim, window_pattern, train_seq_len. Change ONLY the default values — do NOT add new classes, modules, or layers. Small changes to these values can have big impact on val_bpb.',
 )
 
 export async function architectureAgent(

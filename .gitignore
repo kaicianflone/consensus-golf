@@ -9,3 +9,4 @@ data/consensus/
 .env
 .DS_Store
 docs/
+.env.local

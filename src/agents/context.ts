@@ -58,6 +58,10 @@ export function buildAgentSystemPrompt(agentName: string, specialty: string): st
 
 You are proposing an experiment, not writing code for code's sake.
 
+IMPORTANT: The source code provided below uses a Hyperparameters dataclass with default values.
+Your changes should modify ONLY the default values in that dataclass or make minimal, targeted
+changes to existing code. READ THE SOURCE CAREFULLY — use the exact variable names as they appear.
+
 Your response must be a single JSON object matching this schema exactly:
 
 {
@@ -74,10 +78,21 @@ Your response must be a single JSON object matching this schema exactly:
   "precedentRefs": string[]  // Array of precedent IDs that informed this proposal
 }
 
-Rules:
+CRITICAL RULES — READ CAREFULLY:
 - Output ONLY JSON. No markdown fences, no explanation text outside the JSON.
 - modifiedSource must be the COMPLETE file, not a diff or partial snippet.
 - Reference relevant precedentRefs by their IDs to show what prior experiments informed your proposal.
 - Propose exactly one hypothesis per response.
-- TRAIN_BATCH_TOKENS must remain <= 4096.`
+- Do NOT change the train_batch_tokens field (it is controlled by the runner via environment variable).
+
+EXPERIMENT SAFETY — FOLLOW STRICTLY:
+- The code uses MLX (Apple's ML framework). Do NOT introduce PyTorch (torch), CUDA, or non-MLX APIs.
+- Do NOT add new import statements for packages that aren't already imported.
+- Do NOT replace or rename existing classes (GPT, CastedLinear, Attention, etc). Modify them in place.
+- Do NOT change function signatures of existing functions unless you update ALL callers.
+- PREFER small, targeted changes: change ONE hyperparameter, ONE layer config, or ONE small code block.
+- The safest high-impact changes are: learning rates, layer counts, dimensions, attention heads, weight decay, warmup ratios, batch sizes, and activation functions.
+- AVOID: adding new nn.Module subclasses, replacing the optimizer, changing the data loading pipeline, or restructuring the training loop.
+- If prior experiments with outcome "invalid" exist, they CRASHED. Learn from them — do not repeat similar structural changes.
+- TEST YOUR LOGIC: mentally trace through the modified code to verify it will run without errors.`
 }

@@ -9,7 +9,7 @@ import { buildAgentContext, buildAgentSystemPrompt } from './context.js'
 
 const SYSTEM_PROMPT = buildAgentSystemPrompt(
   'CompressionAgent',
-  'Artifact size reduction: quantization schemes, weight packing, pruning, shared embedding tricks, serialization improvements. Biased toward squeezing bytes without destroying BPB.',
+  'Parameter efficiency through SAFE changes to default values in the Hyperparameters dataclass. READ THE SOURCE CODE to find the exact field names and their current defaults. Focus on: aspect_ratio (controls model_dim = depth * aspect_ratio), n_kv_head for grouped query attention, depth/model_dim tradeoffs for parameter count. Do NOT add quantization code, new classes, or change the serialization pipeline. Do NOT change vocab_size (it must match the tokenizer).',
 )
 
 export async function compressionAgent(

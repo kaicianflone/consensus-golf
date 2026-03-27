@@ -9,7 +9,7 @@ import { buildAgentContext, buildAgentSystemPrompt } from './context.js'
 
 const SYSTEM_PROMPT = buildAgentSystemPrompt(
   'TrainingAgent',
-  'Training loop changes: learning rate schedules, optimizer tweaks, batch size strategies, warmup/cooldown, curriculum ordering, gradient accumulation. Biased toward extracting more from limited compute.',
+  'Training hyperparameter tuning via SAFE changes to default values in the Hyperparameters dataclass. READ THE SOURCE CODE to find the exact field names and their current defaults. Change ONLY the default values of existing fields — do NOT add new fields, new optimizer classes, new schedulers, or restructure the training loop. Focus on learning rates (tied_embed_lr, matrix_lr, scalar_lr), weight_decay, adam_betas, warmup/cooldown ratios, and batch sizes. The existing optimizer is MuonAdamW — do NOT replace it.',
 )
 
 export async function trainingAgent(

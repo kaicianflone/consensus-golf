@@ -112,6 +112,8 @@ export async function runExperiment(
     VAL_LOSS_EVERY: '0',
     VAL_BATCH_SIZE: String(policy.execution.valBatchSize),
     MAX_WALLCLOCK_SECONDS: String(policy.execution.smokeMaxWallclockSec),
+    WARMUP_STEPS: '2',
+    MLX_MAX_MICROBATCH_TOKENS: String(policy.execution.smokeBatchTokens),
     DATA_PATH: resolvedDataPath,
     TOKENIZER_PATH: resolvedTokenizerPath,
     // Network blocking
@@ -122,7 +124,8 @@ export async function runExperiment(
     HTTPS_PROXY: '',
   }
 
-  const child = spawn('python3', [scriptPath], {
+  const resolvedScriptPath = path.resolve(scriptPath)
+  const child = spawn('python3', [resolvedScriptPath], {
     env,
     cwd: resolvedRepoPath,
     stdio: ['ignore', 'pipe', 'pipe'],
