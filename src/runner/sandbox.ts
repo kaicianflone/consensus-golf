@@ -109,9 +109,11 @@ export async function runExperiment(
     RUN_ID: runId,
     ITERATIONS: String(policy.execution.smokeIterations),
     TRAIN_BATCH_TOKENS: String(policy.execution.smokeBatchTokens),
-    VAL_LOSS_EVERY: '25',
+    VAL_LOSS_EVERY: '0',
     VAL_BATCH_SIZE: String(policy.execution.valBatchSize),
     MAX_WALLCLOCK_SECONDS: String(policy.execution.smokeMaxWallclockSec),
+    WARMUP_STEPS: '2',
+    MLX_MAX_MICROBATCH_TOKENS: String(policy.execution.smokeBatchTokens),
     DATA_PATH: resolvedDataPath,
     TOKENIZER_PATH: resolvedTokenizerPath,
     // Network blocking

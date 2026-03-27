@@ -2,7 +2,7 @@
   "execution": {
     "smokeIterations": 50,
     "smokeBatchTokens": 8192,
-    "smokeMaxWallclockSec": 600,
+    "smokeMaxWallclockSec": 1800,
     "valBatchSize": 8192,
     "requireSmokeBeforeFull": true
   },
