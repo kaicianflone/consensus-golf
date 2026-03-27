@@ -40,6 +40,7 @@ describe('parseMetrics', () => {
     expect(metrics.stoppedEarly).toBeUndefined()
     expect(metrics.lastStep).toBeUndefined()
     expect(metrics.totalSteps).toBeUndefined()
+    expect(metrics.stepLosses).toEqual([])
   })
 
   it('extracts wallclockSec from last train_time in baseline', () => {
@@ -55,6 +56,31 @@ describe('parseMetrics', () => {
 
     expect(metrics.lastStep).toBe(50)
     expect(metrics.totalSteps).toBe(100)
+  })
+})
+
+describe('parseMetrics stepLosses', () => {
+  it('captures all step-level train_loss values from smoke fixture', () => {
+    const stdout = loadFixture('train-log-smoke.txt')
+    const metrics = parseMetrics(stdout)
+
+    expect(metrics.stepLosses).toHaveLength(14)
+    expect(metrics.stepLosses[0]).toEqual({ step: 1, totalSteps: 50, trainLoss: 6.9428 })
+    expect(metrics.stepLosses[metrics.stepLosses.length - 1]).toEqual({ step: 50, totalSteps: 50, trainLoss: 4.97 })
+  })
+
+  it('returns empty stepLosses for empty string', () => {
+    const metrics = parseMetrics('')
+    expect(metrics.stepLosses).toEqual([])
+  })
+
+  it('skips NaN train_loss entries', () => {
+    const stdout = 'step:1/10 train_loss:6.5\nstep:2/10 train_loss:nan\nstep:3/10 train_loss:5.2\n'
+    const metrics = parseMetrics(stdout)
+
+    expect(metrics.stepLosses).toHaveLength(2)
+    expect(metrics.stepLosses[0]).toEqual({ step: 1, totalSteps: 10, trainLoss: 6.5 })
+    expect(metrics.stepLosses[1]).toEqual({ step: 3, totalSteps: 10, trainLoss: 5.2 })
   })
 })
 

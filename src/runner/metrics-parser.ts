@@ -1,3 +1,9 @@
+export interface StepLoss {
+  step: number
+  totalSteps: number
+  trainLoss: number
+}
+
 export interface ParsedMetrics {
   trainLoss?: number
   valLoss?: number
@@ -7,10 +13,11 @@ export interface ParsedMetrics {
   stoppedEarly?: string
   lastStep?: number
   totalSteps?: number
+  stepLosses: StepLoss[]
 }
 
 export function parseMetrics(stdout: string): ParsedMetrics {
-  const metrics: ParsedMetrics = {}
+  const metrics: ParsedMetrics = { stepLosses: [] }
 
   // 1. Try final_int8_zlib_roundtrip_exact first (most accurate)
   const exactMatch = stdout.match(
@@ -79,7 +86,21 @@ export function parseMetrics(stdout: string): ParsedMetrics {
     metrics.totalSteps = parseInt(lastStep[2], 10)
   }
 
-  // 8. Wallclock from last train_time (convert ms to seconds)
+  // 8. Per-step train_loss capture
+  const stepLossRegex = /step:(\d+)\/(\d+)\s+train_loss:([\d.]+)/g
+  let stepLossMatch: RegExpExecArray | null
+  while ((stepLossMatch = stepLossRegex.exec(stdout)) !== null) {
+    const trainLoss = parseFloat(stepLossMatch[3])
+    if (!isNaN(trainLoss)) {
+      metrics.stepLosses.push({
+        step: parseInt(stepLossMatch[1], 10),
+        totalSteps: parseInt(stepLossMatch[2], 10),
+        trainLoss,
+      })
+    }
+  }
+
+  // 9. Wallclock from last train_time (convert ms to seconds)
   const trainTimeRegex = /train_time:(\d+)ms/g
   let trainTimeMatch: RegExpExecArray | null
   let lastTrainTime: RegExpExecArray | null = null

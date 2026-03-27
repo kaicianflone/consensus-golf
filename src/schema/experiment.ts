@@ -17,6 +17,11 @@ export const ExperimentRunSchema = z.object({
     valBpb: z.number().optional(),
     artifactBytes: z.number().optional(),
     wallclockSec: z.number().optional(),
+    stepLosses: z.array(z.object({
+      step: z.number(),
+      totalSteps: z.number(),
+      trainLoss: z.number(),
+    })).optional(),
   }),
   compliance: z.object({
     artifactWithinLimit: z.boolean(),

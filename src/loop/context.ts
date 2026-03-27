@@ -5,6 +5,8 @@ import type { BoardManager } from '../persistence/board-manager.js'
 import type { PrecedentStore } from '../memory/precedent-store.js'
 import type { ProgressReporter } from './progress.js'
 import type { ConsensusBridge } from '../adapter/consensus-bridge.js'
+import type { BaselineManager } from '../persistence/baseline-manager.js'
+import type { TechniqueCoverageTracker } from '../memory/technique-coverage.js'
 
 export interface CycleContext {
   config: {
@@ -19,6 +21,8 @@ export interface CycleContext {
   board: BoardManager
   consensus: ConsensusBridge
   progress: ProgressReporter
+  baseline: BaselineManager
+  coverageTracker: TechniqueCoverageTracker
   workDir: string
   dryRun: boolean
 }

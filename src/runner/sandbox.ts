@@ -109,6 +109,7 @@ export async function runExperiment(
     RUN_ID: runId,
     ITERATIONS: String(policy.execution.smokeIterations),
     TRAIN_BATCH_TOKENS: String(policy.execution.smokeBatchTokens),
+    TRAIN_LOG_EVERY: '5',
     VAL_LOSS_EVERY: '0',
     VAL_BATCH_SIZE: String(policy.execution.valBatchSize),
     MAX_WALLCLOCK_SECONDS: String(policy.execution.smokeMaxWallclockSec),
@@ -227,6 +228,7 @@ export async function runExperiment(
           valBpb: metrics.valBpb,
           artifactBytes: metrics.artifactBytes,
           wallclockSec: metrics.wallclockSec,
+          stepLosses: metrics.stepLosses,
         },
         compliance: {
           artifactWithinLimit,

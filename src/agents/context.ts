@@ -1,10 +1,18 @@
 import type { Board } from '../schema/board.js'
 import type { Precedent } from '../schema/precedent.js'
 
+export interface AgentContextOptions {
+  coverageMarkdown?: string
+  explorationMode?: boolean
+  explorationTargets?: string[]
+  baselineSignal?: { descentRate: number; lossDrop: number }
+}
+
 export function buildAgentContext(
   board: Board,
   precedents: Precedent[],
   sourceCode: string,
+  options?: AgentContextOptions,
 ): string {
   const sections: string[] = []
 
@@ -34,7 +42,38 @@ export function buildAgentContext(
     sections.push('## Prior Experiments\nNo prior experiments.')
   }
 
-  // 3. Challenge constraints
+  // 3. Coverage map (if provided)
+  if (options?.coverageMarkdown) {
+    sections.push(options.coverageMarkdown)
+  }
+
+  // 4. Exploration directive (if active)
+  if (options?.explorationMode && options?.explorationTargets && options.explorationTargets.length > 0) {
+    const explorationLines = [
+      '## EXPLORATION MODE (ACTIVE)',
+      'You are in exploration mode this cycle. You MUST propose an experiment targeting',
+      'one of these underexplored technique families:',
+      '',
+      ...options.explorationTargets.map(t => `- ${t}`),
+      '',
+      'Do NOT propose changes similar to recent experiments. Prioritize novelty.',
+      'Your proposal will be evaluated on whether it explores NEW territory.',
+    ]
+    sections.push(explorationLines.join('\n'))
+  }
+
+  // 5. Baseline signal (if provided)
+  if (options?.baselineSignal) {
+    sections.push(
+      [
+        '## Baseline Signal',
+        `Baseline descent rate: ${options.baselineSignal.descentRate} (loss drop: ${options.baselineSignal.lossDrop} over 50 steps)`,
+        'Your proposal will be evaluated on whether it improves the descent rate, not just final BPB.',
+      ].join('\n'),
+    )
+  }
+
+  // 6. Challenge constraints
   sections.push(
     [
       '## Challenge Constraints',
@@ -47,7 +86,7 @@ export function buildAgentContext(
     ].join('\n'),
   )
 
-  // 4. Source code
+  // 7. Source code
   sections.push(`## Current train_gpt_mlx.py source:\n\n${sourceCode}`)
 
   return sections.join('\n\n')

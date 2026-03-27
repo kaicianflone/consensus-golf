@@ -2,7 +2,7 @@ import { z } from 'zod'
 
 export const AgentProposalResponseSchema = z.object({
   title: z.string(),
-  category: z.enum(['architecture', 'training', 'compression', 'evaluation']),
+  category: z.enum(['architecture', 'training', 'compression', 'evaluation', 'baseline']),
   thesis: z.string(),
   patchDescription: z.string(),
   modifiedSource: z.string(),

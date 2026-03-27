@@ -11,6 +11,9 @@ import { judgeResult } from '../judges/result-judge.js'
 import { checkCompliance } from '../judges/compliance-check.js'
 import { shouldMerge } from '../policy/merge-policy.js'
 import { runExperiment } from '../runner/sandbox.js'
+import { analyzeLossCurve, compareToBaseline } from '../runner/loss-curve-analyzer.js'
+import { getExplorerForCycle } from '../agents/exploration.js'
+import type { AgentContextOptions } from '../agents/context.js'
 
 export async function runCycle(
   ctx: CycleContext,
@@ -18,7 +21,7 @@ export async function runCycle(
   totalCycles: number,
   boardId: string,
 ): Promise<void> {
-  const { config, llm, audit, precedents, board, consensus, progress, workDir, dryRun } = ctx
+  const { config, llm, audit, precedents, board, consensus, progress, baseline, coverageTracker, workDir, dryRun } = ctx
 
   progress.phase(`=== Cycle ${cycleNumber}/${totalCycles} ===`)
   progress.blank()
@@ -38,6 +41,7 @@ export async function runCycle(
   const sourceCode = fs.readFileSync(sourceCodePath, 'utf-8')
 
   // 4. Load precedents for each agent
+  const agentNames = ['architecture', 'compression', 'training']
   const archPrecedents = precedents.readForAgent('architecture')
   const compPrecedents = precedents.readForAgent('compression')
   const trainPrecedents = precedents.readForAgent('training')
@@ -53,17 +57,87 @@ export async function runCycle(
     }
   }
 
+  // ─── PHASE 0.5: Baseline capture + coverage map + exploration ────
+  const smokeConfig = {
+    iterations: config.policy.execution.smokeIterations,
+    batchTokens: config.policy.execution.smokeBatchTokens,
+  }
+
+  if (!baseline.exists(boardId) || baseline.isStale(boardId, smokeConfig)) {
+    progress.phase('Capturing baseline loss curve...')
+    try {
+      const baselineProposal: Proposal = {
+        id: `baseline-${boardId}-${cycleNum}`,
+        boardId,
+        agent: 'baseline',
+        status: 'draft',
+        title: 'Baseline capture',
+        category: 'baseline',
+        thesis: 'Capture unmodified training curve for comparison',
+        patchDescription: 'No changes — unmodified source',
+        modifiedSource: sourceCode,
+        predictedImpact: {},
+        risks: [],
+        precedentRefs: [],
+        createdAt: new Date().toISOString(),
+      }
+      const baselineRun = await runExperiment(
+        baselineProposal, sourceCode, config.policy, config.pgolf, workDir,
+        (line: string) => { progress.agent('baseline', line) },
+      )
+      const baselineSignal = analyzeLossCurve(baselineRun.metrics.stepLosses ?? [])
+      baseline.save({
+        boardId,
+        capturedAt: new Date().toISOString(),
+        config: smokeConfig,
+        stepLosses: baselineRun.metrics.stepLosses ?? [],
+        signal: baselineSignal,
+      })
+      progress.phase(`Baseline captured: descent_rate=${baselineSignal.descentRate.toFixed(6)}, loss_drop=${baselineSignal.lossDrop.toFixed(4)}`)
+    } catch (err) {
+      progress.phase(`Baseline capture failed: ${String(err)} — continuing without baseline`)
+    }
+    progress.blank()
+  }
+
+  // Build coverage map and determine exploration agent
+  const allPrecedentsForCoverage = precedents.readAll()
+  const coverageMap = coverageTracker.buildCoverageMap(allPrecedentsForCoverage)
+  const coverageMarkdown = coverageTracker.formatForAgent(coverageMap)
+  const explorationTargets = coverageTracker.getExplorationTargets(coverageMap, 3)
+  const explorerIndex = getExplorerForCycle(cycleNum, agentNames.length)
+  const explorerName = agentNames[explorerIndex]
+
+  const baselineCurve = baseline.load(boardId)
+  const baselineSignalForAgents = baselineCurve
+    ? { descentRate: baselineCurve.signal.descentRate, lossDrop: baselineCurve.signal.lossDrop }
+    : undefined
+
+  function agentContextOptions(agentName: string): AgentContextOptions {
+    return {
+      coverageMarkdown,
+      explorationMode: agentName === explorerName,
+      explorationTargets: agentName === explorerName ? explorationTargets : undefined,
+      baselineSignal: baselineSignalForAgents,
+    }
+  }
+
+  if (explorationTargets.length > 0) {
+    progress.phase(`Explorer this cycle: ${explorerName} → targeting: ${explorationTargets.join(', ')}`)
+  }
+  progress.phase(`Technique coverage: ${coverageMap.coveragePct.toFixed(0)}% (${coverageMap.explored.length}/${coverageMap.explored.length + coverageMap.unexplored.length} families)`)
+  progress.blank()
+
   // ─── PHASE 1: Generate proposals ─────────────────────────────────
   progress.phase('Generating proposals...')
   progress.pushIndent()
 
   const proposalResults = await Promise.allSettled([
-    architectureAgent(llm, boardState, archPrecedents, sourceCode, config.agents),
-    compressionAgent(llm, boardState, compPrecedents, sourceCode, config.agents),
-    trainingAgent(llm, boardState, trainPrecedents, sourceCode, config.agents),
+    architectureAgent(llm, boardState, archPrecedents, sourceCode, config.agents, agentContextOptions('architecture')),
+    compressionAgent(llm, boardState, compPrecedents, sourceCode, config.agents, agentContextOptions('compression')),
+    trainingAgent(llm, boardState, trainPrecedents, sourceCode, config.agents, agentContextOptions('training')),
   ])
 
-  const agentNames = ['architecture', 'compression', 'training']
   const validProposals: Proposal[] = []
 
   for (let i = 0; i < proposalResults.length; i++) {
@@ -215,6 +289,18 @@ export async function runCycle(
     let run
     try {
       run = await runExperiment(proposal, sourceCode, config.policy, config.pgolf, workDir, (line: string) => { progress.agent(proposal.agent, line) })
+
+      // Loss curve analysis
+      const curveSignal = analyzeLossCurve(run.metrics.stepLosses ?? [])
+      const curveComparison = baselineCurve
+        ? compareToBaseline(curveSignal, baselineCurve.signal)
+        : undefined
+      if (curveSignal.stepCount >= 2) {
+        progress.agent(proposal.agent, `descent_rate: ${curveSignal.descentRate.toFixed(6)} loss_drop: ${curveSignal.lossDrop.toFixed(4)} (${curveSignal.lossDropFraction > 0 ? '+' : ''}${(curveSignal.lossDropFraction * 100).toFixed(1)}%)`)
+        if (curveComparison) {
+          progress.agent(proposal.agent, `vs baseline: ${curveComparison.verdict} (relative: ${curveComparison.relativeDescentRate.toFixed(3)})`)
+        }
+      }
 
       if (run.metrics.valBpb !== undefined) {
         progress.metric('val_bpb', run.metrics.valBpb, updatedBoard.baseline.valBpb)
