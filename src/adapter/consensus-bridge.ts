@@ -54,7 +54,7 @@ export class ConsensusBridge {
     await this.board.ledger.ensureInitialCredits(judgeId)
     await this.board.engine.vote(judgeId, jobId, {
       submissionId: entry.submissionId,
-      score: judgment.recommendation === 'approve' ? 1 : judgment.recommendation === 'revise' ? 0 : -1,
+      score: judgment.recommendation === 'approve' ? 1 : judgment.recommendation === 'revise' ? 0.5 : -1,
       weight: judgment.compositeScore,
       rationale: judgment.reasoning,
     })
