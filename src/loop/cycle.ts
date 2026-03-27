@@ -8,10 +8,13 @@ import { compressionAgent } from '../agents/compression.js'
 import { trainingAgent } from '../agents/training.js'
 import { runMultiJudge } from '../judges/judge-personas.js'
 import { judgeResult } from '../judges/result-judge.js'
-import { checkCompliance } from '../judges/compliance-check.js'
 import { shouldMerge } from '../policy/merge-policy.js'
 import { runExperiment } from '../runner/sandbox.js'
 import { analyzeLossCurve, compareToBaseline } from '../runner/loss-curve-analyzer.js'
+import { Tier0Runner } from '../runner/tier0-runner.js'
+import { Tier1Runner } from '../runner/tier1-runner.js'
+import { PipelineOrchestrator } from '../runner/pipeline.js'
+import type { TierRunnerContext } from '../runner/tier-runner.js'
 import { getExplorerForCycle } from '../agents/exploration.js'
 import type { AgentContextOptions } from '../agents/context.js'
 
@@ -161,33 +164,39 @@ export async function runCycle(
   progress.popIndent()
   progress.blank()
 
-  // ─── PHASE 2: Compliance check ───────────────────────────────────
-  progress.phase('Checking compliance...')
+  // ─── PHASE 2: Tier 0 compliance gate ────────────────────────────
+  progress.phase('Checking compliance (Tier 0)...')
   progress.pushIndent()
 
-  const complianceResults = await Promise.all(
-    validProposals.map((p) => checkCompliance(p.modifiedSource, sourceCode)),
-  )
+  const tier0 = new Tier0Runner()
+  const tier1 = new Tier1Runner()
+  const pipeline = new PipelineOrchestrator([tier0, tier1], audit)
+
+  const tierCtx: TierRunnerContext = {
+    sourceCode,
+    boardId,
+    workDir,
+    policy: config.policy,
+    pgolf: config.pgolf,
+    baselineCurve: baseline.load(boardId),
+    onProgress: (agent: string, line: string) => progress.agent(agent, line),
+  }
+
+  const tier0Results = await pipeline.runTier(0, validProposals, tierCtx, cycleNum)
 
   const compliantProposals: Proposal[] = []
-  for (let i = 0; i < validProposals.length; i++) {
-    const proposal = validProposals[i]
-    const compliance = complianceResults[i]
-    const passed = compliance.syntaxValid && compliance.securityScan.safe
-    if (passed) {
-      progress.agentResult(proposal.agent, 'compliance passed', true)
-      compliantProposals.push(proposal)
+  for (const result of tier0Results) {
+    if (result.promotable) {
+      progress.agentResult(result.proposal.agent, `compliance passed (risk: ${result.postGate.riskScore?.toFixed(2) ?? 'N/A'})`, true)
+      compliantProposals.push(result.proposal)
     } else {
-      const reason = !compliance.syntaxValid
-        ? `syntax error: ${compliance.syntaxError ?? 'unknown'}`
-        : `security scan blocked: ${compliance.securityScan.blockedPatterns.join(', ')}`
-      progress.agentResult(proposal.agent, `compliance failed: ${reason}`, false)
+      progress.agentResult(result.proposal.agent, `compliance failed: ${result.postGate.reason}`, false)
       try {
-        await consensus.slashAgent(proposal.agent, config.consensus.rewards.penalizeNoncompliant, 'compliance failure')
+        await consensus.slashAgent(result.proposal.agent, config.consensus.rewards.penalizeNoncompliant, 'compliance failure')
       } catch (err) {
-        progress.agentResult(proposal.agent, `ledger slash failed: ${String(err)}`, false)
+        progress.agentResult(result.proposal.agent, `ledger slash failed: ${String(err)}`, false)
       }
-      audit.write(cycleNum, 'proposal_rejected', proposal.id, `Proposal ${proposal.id} rejected: ${reason}`, { reason, syntaxValid: compliance.syntaxValid, securitySafe: compliance.securityScan.safe }, proposal.agent)
+      audit.write(cycleNum, 'proposal_rejected', result.proposal.id, `Proposal ${result.proposal.id} rejected: ${result.postGate.reason}`, { reason: result.postGate.reason, riskScore: result.postGate.riskScore }, result.proposal.agent)
     }
   }
 
@@ -264,7 +273,7 @@ export async function runCycle(
   progress.popIndent()
   progress.blank()
 
-  // ─── PHASE 5: Execute or dry-run ─────────────────────────────────
+  // ─── PHASE 5: Execute via Tier 1 pipeline ───────────────────────
   if (approvedProposals.length === 0 || dryRun) {
     if (dryRun) {
       progress.phase('[DRY RUN] Skipping execution of approved proposals.')
@@ -275,93 +284,85 @@ export async function runCycle(
     return
   }
 
-  progress.phase('Executing approved proposals...')
+  progress.phase('Executing approved proposals (Tier 1)...')
 
+  const tier1Results = await pipeline.runTier(1, approvedProposals, tierCtx, cycleNum)
+  const promoted = pipeline.getPromoted(tier1Results, config.policy.tiers.tier1.maxPromotions)
   const updatedBoard = board.load(boardId) ?? boardState
 
-  for (const proposal of approvedProposals) {
+  for (const tierResult of tier1Results) {
+    const { proposal, run, curveSignal, baselineComparison, postGate } = tierResult
     progress.blank()
-    progress.phase(`  Running: ${proposal.title} [${proposal.agent}]`)
+    progress.phase(`  Result: ${proposal.title} [${proposal.agent}]`)
     progress.pushIndent()
 
-    audit.write(cycleNum, 'run_started', proposal.id, `Execution started for proposal ${proposal.id}`, { title: proposal.title, agent: proposal.agent }, proposal.agent)
+    if (run) {
+      audit.write(cycleNum, run.status === 'passed' ? 'run_completed' : 'run_failed', run.id, `Run ${run.status} for proposal ${proposal.id}`, { proposalId: proposal.id, status: run.status, valBpb: run.metrics.valBpb }, proposal.agent)
 
-    let run
-    try {
-      run = await runExperiment(proposal, sourceCode, config.policy, config.pgolf, workDir, (line: string) => { progress.agent(proposal.agent, line) })
-
-      // Loss curve analysis
-      const curveSignal = analyzeLossCurve(run.metrics.stepLosses ?? [])
-      const curveComparison = baselineCurve
-        ? compareToBaseline(curveSignal, baselineCurve.signal)
-        : undefined
-      if (curveSignal.stepCount >= 2) {
+      // Log curve analysis
+      if (curveSignal && curveSignal.stepCount >= 2) {
         progress.agent(proposal.agent, `descent_rate: ${curveSignal.descentRate.toFixed(6)} loss_drop: ${curveSignal.lossDrop.toFixed(4)} (${curveSignal.lossDropFraction > 0 ? '+' : ''}${(curveSignal.lossDropFraction * 100).toFixed(1)}%)`)
-        if (curveComparison) {
-          progress.agent(proposal.agent, `vs baseline: ${curveComparison.verdict} (relative: ${curveComparison.relativeDescentRate.toFixed(3)})`)
+        if (baselineComparison) {
+          progress.agent(proposal.agent, `vs baseline: ${baselineComparison.verdict} (relative: ${baselineComparison.relativeDescentRate.toFixed(3)})`)
         }
       }
 
       if (run.metrics.valBpb !== undefined) {
         progress.metric('val_bpb', run.metrics.valBpb, updatedBoard.baseline.valBpb)
       }
-      if (run.metrics.valLoss !== undefined && updatedBoard.baseline.valBpb !== undefined) {
+      if (run.metrics.valLoss !== undefined) {
         progress.metric('val_loss', run.metrics.valLoss, updatedBoard.baseline.valBpb)
       }
-      if (run.metrics.artifactBytes !== undefined) {
-        progress.metric('artifact_bytes', run.metrics.artifactBytes, updatedBoard.baseline.artifactBytes)
-      }
 
-      if (run.status === 'passed') {
-        audit.write(cycleNum, 'run_completed', run.id, `Run completed for proposal ${proposal.id}: status=${run.status}`, { proposalId: proposal.id, status: run.status, valBpb: run.metrics.valBpb, artifactBytes: run.metrics.artifactBytes }, proposal.agent)
-      } else {
-        audit.write(cycleNum, 'run_failed', run.id, `Run failed for proposal ${proposal.id}: status=${run.status}`, { proposalId: proposal.id, status: run.status }, proposal.agent)
-      }
-    } catch (err) {
-      progress.agentResult(proposal.agent, `execution error: ${String(err)}`, false)
-      audit.write(cycleNum, 'run_failed', proposal.id, `Execution threw error: ${String(err)}`, { error: String(err) }, proposal.agent)
-      progress.popIndent()
-      continue
+      // Gate result
+      progress.agentResult(proposal.agent, `tier 1 gate: ${postGate.passed ? 'PASSED' : 'FAILED'} — ${postGate.reason}`, postGate.passed)
     }
 
-    try {
-      const currentBoard = board.load(boardId) ?? updatedBoard
-      const precedent = await judgeResult(llm, proposal, run, currentBoard, config.agents.judgeMaxTokens)
-      precedents.append(precedent)
-      audit.write(cycleNum, 'precedent_created', precedent.id, `Precedent created: [${precedent.outcome}] ${precedent.summary}`, { outcome: precedent.outcome, family: precedent.family, delta: precedent.metrics.delta }, proposal.agent)
+    // Result judging + merge decision (only for runs that completed)
+    if (run) {
+      try {
+        const currentBoard = board.load(boardId) ?? updatedBoard
+        const precedent = await judgeResult(llm, proposal, run, currentBoard, config.agents.judgeMaxTokens)
+        precedents.append(precedent)
+        audit.write(cycleNum, 'precedent_created', precedent.id, `Precedent created: [${precedent.outcome}] ${precedent.summary}`, { outcome: precedent.outcome, family: precedent.family, delta: precedent.metrics.delta }, proposal.agent)
 
-      const currentBoardState = board.load(boardId) ?? currentBoard
-      if (run.status === 'passed' && shouldMerge(run.metrics, currentBoardState, config.policy.merge, config.pgolf.maxArtifactBytes)) {
-        board.updateBest(boardId, {
-          valBpb: run.metrics.valBpb!,
-          artifactBytes: run.metrics.artifactBytes ?? currentBoardState.currentBest.artifactBytes,
-          commitRef: run.id,
-          proposalId: proposal.id,
-        })
-        progress.agentResult(proposal.agent, 'MERGED: new best result!', true)
-        audit.write(cycleNum, 'baseline_updated', boardId, `Board updated with new best from proposal ${proposal.id}`, { valBpb: run.metrics.valBpb, artifactBytes: run.metrics.artifactBytes, proposalId: proposal.id }, proposal.agent)
+        const currentBoardState = board.load(boardId) ?? currentBoard
+        if (run.status === 'passed' && shouldMerge(run.metrics, currentBoardState, config.policy.merge, config.pgolf.maxArtifactBytes)) {
+          board.updateBest(boardId, {
+            valBpb: run.metrics.valBpb!,
+            artifactBytes: run.metrics.artifactBytes ?? currentBoardState.currentBest.artifactBytes,
+            commitRef: run.id,
+            proposalId: proposal.id,
+          })
+          progress.agentResult(proposal.agent, 'MERGED: new best result!', true)
+          audit.write(cycleNum, 'baseline_updated', boardId, `Board updated with new best from proposal ${proposal.id}`, { valBpb: run.metrics.valBpb, artifactBytes: run.metrics.artifactBytes, proposalId: proposal.id }, proposal.agent)
 
-        try {
-          await consensus.rewardAgent(proposal.agent, config.consensus.rewards.merge, 'merge accepted')
-        } catch (err) {
-          progress.agentResult(proposal.agent, `ledger reward failed: ${String(err)}`, false)
-        }
-      } else {
-        try {
-          if (precedent.outcome === 'positive' || precedent.outcome === 'negative') {
-            await consensus.rewardAgent(proposal.agent, config.consensus.rewards.usefulResult, `useful ${precedent.outcome} result`)
-          } else if (precedent.outcome === 'invalid') {
-            await consensus.slashAgent(proposal.agent, config.consensus.rewards.penalizeInvalid, 'invalid experiment result')
+          try {
+            await consensus.rewardAgent(proposal.agent, config.consensus.rewards.merge, 'merge accepted')
+          } catch (err) {
+            progress.agentResult(proposal.agent, `ledger reward failed: ${String(err)}`, false)
           }
-        } catch (err) {
-          progress.agentResult(proposal.agent, `ledger update failed: ${String(err)}`, false)
+        } else {
+          try {
+            if (precedent.outcome === 'positive' || precedent.outcome === 'negative') {
+              await consensus.rewardAgent(proposal.agent, config.consensus.rewards.usefulResult, `useful ${precedent.outcome} result`)
+            } else if (precedent.outcome === 'invalid') {
+              await consensus.slashAgent(proposal.agent, config.consensus.rewards.penalizeInvalid, 'invalid experiment result')
+            }
+          } catch (err) {
+            progress.agentResult(proposal.agent, `ledger update failed: ${String(err)}`, false)
+          }
         }
+      } catch (err) {
+        progress.agentResult(proposal.agent, `result judging failed: ${String(err)}`, false)
       }
-    } catch (err) {
-      progress.agentResult(proposal.agent, `result judging failed: ${String(err)}`, false)
     }
 
     progress.popIndent()
+  }
+
+  if (promoted.length > 0) {
+    progress.phase(`Tier 1 promoted ${promoted.length} proposal(s) for future Tier 2`)
   }
 
   progress.blank()
