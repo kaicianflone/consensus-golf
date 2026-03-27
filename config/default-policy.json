@@ -10,5 +10,9 @@
     "minBpbImprovement": 0.002,
     "requireArtifactWithinLimit": true,
     "archiveNegativeResults": true
+  },
+  "tiers": {
+    "tier0": { "riskThreshold": 0.7 },
+    "tier1": { "descentRateThreshold": 0.8, "maxPromotions": 2 }
   }
 }

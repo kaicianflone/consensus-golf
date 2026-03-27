@@ -7,7 +7,7 @@
   "policy": {
     "type": "APPROVAL_VOTE",
     "quorum": 1,
-    "minScore": 1,
+    "minScore": 0,
     "minMargin": 0,
     "weightMode": "equal",
     "tieBreak": "confidence"
