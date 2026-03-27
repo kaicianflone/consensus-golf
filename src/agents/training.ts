@@ -5,11 +5,11 @@ import { AgentProposalResponseSchema, type Proposal } from '../schema/proposal.j
 import type { Board } from '../schema/board.js'
 import type { Precedent } from '../schema/precedent.js'
 import type { AgentConfig } from '../schema/config.js'
-import { buildAgentContext, buildAgentSystemPrompt } from './context.js'
+import { buildAgentContext, buildAgentSystemPrompt, type AgentContextOptions } from './context.js'
 
 const SYSTEM_PROMPT = buildAgentSystemPrompt(
   'TrainingAgent',
-  'Training hyperparameter tuning via SAFE changes to default values in the Hyperparameters dataclass. READ THE SOURCE CODE to find the exact field names and their current defaults. Change ONLY the default values of existing fields — do NOT add new fields, new optimizer classes, new schedulers, or restructure the training loop. Focus on learning rates (tied_embed_lr, matrix_lr, scalar_lr), weight_decay, adam_betas, warmup/cooldown ratios, and batch sizes. The existing optimizer is MuonAdamW — do NOT replace it.',
+  'Training hyperparameter tuning via SAFE changes to default values in the Hyperparameters dataclass. READ THE SOURCE CODE to find the exact field names and their current defaults. Change ONLY the default values of existing fields — do NOT add new fields, new optimizer classes, new schedulers, or restructure the training loop. Focus on learning rates (tied_embed_lr, matrix_lr, scalar_lr), weight_decay, adam_betas, warmup/cooldown ratios, and batch sizes. The existing optimizer is MuonAdamW — do NOT replace it. Consider that 50-step smoke tests amplify the importance of warmup configuration and initial learning rate. Aggressive learning rates may show faster descent in short runs.',
 )
 
 export async function trainingAgent(
@@ -18,8 +18,9 @@ export async function trainingAgent(
   precedents: Precedent[],
   sourceCode: string,
   config: AgentConfig,
+  contextOptions?: AgentContextOptions,
 ): Promise<Proposal> {
-  const context = buildAgentContext(board, precedents, sourceCode)
+  const context = buildAgentContext(board, precedents, sourceCode, contextOptions)
   const response = await callLlmAndParse(
     llm,
     SYSTEM_PROMPT,

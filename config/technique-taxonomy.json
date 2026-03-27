@@ -1,0 +1,16 @@
+{
+  "families": {
+    "depth-scaling": { "category": "architecture", "description": "Increase/decrease layer count", "tags": ["depth", "num_layers", "layer-count", "layer-pruning"] },
+    "width-scaling": { "category": "architecture", "description": "Adjust model dimension", "tags": ["model_dim", "width", "dimension", "dimension-reduction"] },
+    "attention-config": { "category": "architecture", "description": "Modify attention heads, KV heads, GQA", "tags": ["num_heads", "num_kv_heads", "gqa", "attention", "grouped-query-attention", "kv-compression"] },
+    "mlp-config": { "category": "architecture", "description": "Adjust MLP expansion ratio", "tags": ["mlp_mult", "mlp", "expansion"] },
+    "sequence-length": { "category": "architecture", "description": "Adjust train_seq_len", "tags": ["seq_len", "train_seq_len", "context"] },
+    "rope-config": { "category": "architecture", "description": "Modify RoPE base frequency", "tags": ["rope_base", "rope", "positional"] },
+    "learning-rate": { "category": "training", "description": "Adjust learning rates", "tags": ["matrix_lr", "scalar_lr", "tied_embed_lr", "learning_rate", "lr"] },
+    "warmup-warmdown": { "category": "training", "description": "Adjust warmup/warmdown schedule", "tags": ["warmup", "warmdown", "warmdown_iters", "warmup_steps", "schedule"] },
+    "momentum-optimizer": { "category": "training", "description": "Tune Muon optimizer momentum", "tags": ["muon_momentum", "muon_backend_steps", "momentum", "muon"] },
+    "adam-config": { "category": "training", "description": "Adjust Adam betas and epsilon", "tags": ["beta1", "beta2", "adam_eps", "adam"] },
+    "gradient-clipping": { "category": "training", "description": "Adjust gradient clipping", "tags": ["grad_clip_norm", "grad_clip", "clipping"] },
+    "param-efficiency": { "category": "compression", "description": "Parameter count reduction techniques", "tags": ["parameter-reduction", "efficiency", "param_count", "model-compression"] }
+  }
+}

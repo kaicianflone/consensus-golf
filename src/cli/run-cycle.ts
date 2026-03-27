@@ -9,6 +9,9 @@ import { runScheduled } from '../loop/scheduler.js'
 import { LocalBoard, createStorage } from '@consensus-tools/core'
 import { ConsensusBridge } from '../adapter/consensus-bridge.js'
 import { buildConsensusToolsConfig } from '../adapter/consensus-config.js'
+import { BaselineManager } from '../persistence/baseline-manager.js'
+import { TechniqueCoverageTracker } from '../memory/technique-coverage.js'
+import type { TaxonomyData } from '../memory/technique-coverage.js'
 import type { CycleContext } from '../loop/context.js'
 
 function parseArgs(): { cycles: number; boardId: string; dryRun: boolean; budgetSeconds?: number } {
@@ -72,6 +75,13 @@ async function main(): Promise<void> {
 
   fs.mkdirSync('data/work', { recursive: true })
   fs.mkdirSync('data/consensus', { recursive: true })
+  fs.mkdirSync('data/baselines', { recursive: true })
+
+  // Load technique taxonomy and create coverage tracker
+  const taxonomyRaw = JSON.parse(fs.readFileSync('config/technique-taxonomy.json', 'utf8'))
+  const taxonomy: TaxonomyData = taxonomyRaw
+  const coverageTracker = new TechniqueCoverageTracker(taxonomy)
+  const baseline = new BaselineManager('data/baselines')
 
   const ctx: CycleContext = {
     config: { policy, pgolf, agents, consensus: consensusConfig },
@@ -81,6 +91,8 @@ async function main(): Promise<void> {
     board,
     consensus,
     progress,
+    baseline,
+    coverageTracker,
     workDir: 'data/work',
     dryRun,
   }
