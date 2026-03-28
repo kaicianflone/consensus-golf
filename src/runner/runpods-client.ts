@@ -58,27 +58,30 @@ export class RunPodsClient {
     return json.data
   }
 
-  async createPod(config: RunPodsConfig, name: string, sshPublicKey?: string): Promise<string> {
-    const env = sshPublicKey ? `env: [{ key: "PUBLIC_KEY", value: ${JSON.stringify(sshPublicKey)} }]` : ''
+  async createPod(config: RunPodsConfig, name: string, options?: { dockerArgs?: string; env?: Array<{ key: string; value: string }> }): Promise<string> {
     const templatePart = config.templateId ? `templateId: "${config.templateId}"` : `imageName: "${config.containerImage}"`
     const volumePart = config.volumeId ? `networkVolumeId: "${config.volumeId}"` : ''
     const volumeMountPath = config.volumeMountPath ?? '/workspace'
-    const containerDisk = config.containerDiskInGb ?? 20
-    const volumeGb = config.volumeInGb ?? 0
+    const containerDisk = config.containerDiskInGb ?? 40
+    const envEntries = options?.env ?? []
+    const envStr = envEntries.length > 0
+      ? `env: [${envEntries.map(e => `{ key: ${JSON.stringify(e.key)}, value: ${JSON.stringify(e.value)} }`).join(', ')}]`
+      : ''
+    const dockerArgsStr = options?.dockerArgs ? `dockerArgs: ${JSON.stringify(options.dockerArgs)}` : ''
 
     const query = `mutation {
       podFindAndDeployOnDemand(input: {
         cloudType: ALL
         gpuCount: ${config.gpuCount}
         containerDiskInGb: ${containerDisk}
-        ${volumeGb > 0 ? `volumeInGb: ${volumeGb}` : ''}
         gpuTypeId: "${config.gpuType}"
         name: "${name}"
         ${templatePart}
         ports: "22/tcp"
         volumeMountPath: "${volumeMountPath}"
         ${volumePart}
-        ${env}
+        ${envStr}
+        ${dockerArgsStr}
       }) {
         id
         desiredStatus
@@ -140,24 +143,39 @@ export class RunPodsClient {
   }
 
   /**
-   * Execute a command on a running pod via SSH proxy.
-   * Uses ssh {podId}@ssh.runpod.io to connect.
-   * Returns the combined stdout/stderr output.
+   * Get the SSH address for a pod (podHostId@ssh.runpod.io).
+   * The podHostId includes a machine suffix that the SSH proxy requires.
    */
-  async executeCommand(podId: string, command: string, timeoutMs = 900_000): Promise<string> {
+  async getSshAddress(podId: string): Promise<string> {
+    const query = `query { pod(input: { podId: "${podId}" }) { machine { podHostId } } }`
+    const data = await this.graphql<{ pod: { machine: { podHostId: string } } }>(query)
+    return `${data.pod.machine.podHostId}@ssh.runpod.io`
+  }
+
+  /**
+   * Execute a command on a running pod via SSH.
+   *
+   * Uses `-tt` to force PTY allocation (required by RunPods SSH proxy) and
+   * pipes the command through stdin. Returns combined stdout/stderr.
+   *
+   * Requires ~/.ssh/id_ed25519 key registered in RunPods account settings.
+   */
+  async executeCommand(podId: string, command: string, timeoutMs = 900_000, sshKeyPath = '~/.ssh/id_ed25519'): Promise<string> {
     const { spawn } = await import('child_process')
+    const sshAddress = await this.getSshAddress(podId)
+    const resolvedKeyPath = sshKeyPath.replace('~', process.env.HOME ?? '')
 
     return new Promise<string>((resolve, reject) => {
       let output = ''
-      const sshArgs = [
+      const child = spawn('ssh', [
+        '-tt',
         '-o', 'StrictHostKeyChecking=no',
         '-o', 'UserKnownHostsFile=/dev/null',
-        '-o', `ConnectTimeout=30`,
-        `${podId}@ssh.runpod.io`,
-        command,
-      ]
-
-      const child = spawn('ssh', sshArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
+        '-o', 'ConnectTimeout=30',
+        '-i', resolvedKeyPath,
+        sshAddress,
+        'bash',
+      ], { stdio: ['pipe', 'pipe', 'pipe'] })
 
       const timer = setTimeout(() => {
         child.kill('SIGKILL')
@@ -167,14 +185,13 @@ export class RunPodsClient {
       child.stdout?.on('data', (chunk: Buffer) => { output += chunk.toString() })
       child.stderr?.on('data', (chunk: Buffer) => { output += chunk.toString() })
 
-      child.on('close', (code) => {
+      // Pipe the command + exit through stdin
+      child.stdin?.write(command + '\nexit\n')
+      child.stdin?.end()
+
+      child.on('close', () => {
         clearTimeout(timer)
-        if (code === 0 || output.includes('final_int8_zlib_roundtrip')) {
-          resolve(output)
-        } else {
-          // Training may exit non-zero but still produce useful output
-          resolve(output)
-        }
+        resolve(output)
       })
 
       child.on('error', (err) => {
@@ -185,13 +202,32 @@ export class RunPodsClient {
   }
 
   /**
-   * Upload file content to a pod via SSH cat heredoc.
-   * No runpodctl dependency required.
+   * Upload file content to a pod via base64 encoding over SSH.
    */
   async uploadScript(podId: string, content: string, remotePath: string): Promise<void> {
-    // Escape single quotes in content for heredoc
-    const escaped = content.replace(/'/g, "'\\''")
-    const command = `cat > ${remotePath} << 'CGOLF_SCRIPT_EOF'\n${content}\nCGOLF_SCRIPT_EOF`
-    await this.executeCommand(podId, command, 30_000)
+    const b64 = Buffer.from(content).toString('base64')
+    // Split into chunks to avoid shell line length limits
+    const chunkSize = 50000
+    const chunks = []
+    for (let i = 0; i < b64.length; i += chunkSize) {
+      chunks.push(b64.slice(i, i + chunkSize))
+    }
+
+    let cmd: string
+    if (chunks.length === 1) {
+      cmd = `echo '${chunks[0]}' | base64 -d > ${remotePath} && echo UPLOADED $(wc -c < ${remotePath}) bytes`
+    } else {
+      // For large files, write chunks to a temp file then decode
+      const cmds = chunks.map((chunk, i) =>
+        i === 0 ? `echo '${chunk}' > /tmp/cgolf_upload.b64` : `echo '${chunk}' >> /tmp/cgolf_upload.b64`
+      )
+      cmds.push(`base64 -d /tmp/cgolf_upload.b64 > ${remotePath} && rm /tmp/cgolf_upload.b64 && echo UPLOADED $(wc -c < ${remotePath}) bytes`)
+      cmd = cmds.join(' && ')
+    }
+
+    const output = await this.executeCommand(podId, cmd, 60_000)
+    if (!output.includes('UPLOADED')) {
+      throw new RunPodsApiError(`Script upload failed: ${output.slice(-200)}`)
+    }
   }
 }

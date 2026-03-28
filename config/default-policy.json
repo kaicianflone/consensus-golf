@@ -19,13 +19,13 @@
       "gpuCount": 1,
       "templateId": "",
       "containerImage": "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04",
-      "volumeId": "",
-      "dataPath": "/workspace/data/datasets/fineweb10B_sp1024",
-      "tokenizerPath": "/workspace/data/tokenizers/fineweb_1024_bpe.model",
+      "volumeId": "mj4ve5tkh5",
+      "dataPath": "/workspace/datasets/datasets/fineweb10B_sp1024",
+      "tokenizerPath": "/workspace/datasets/tokenizers/fineweb_1024_bpe.model",
       "trainScript": "train_gpt.py",
       "maxWallclockSec": 900,
       "estimatedCostPerRun": 1.0,
-      "enabled": false
+      "enabled": true
     }
   }
 }

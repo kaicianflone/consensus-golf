@@ -47,7 +47,15 @@ export class Tier2Runner implements TierRunner {
       ctx.onProgress?.(proposal.agent, `Pod created: ${podId}, waiting for RUNNING...`)
 
       await this.client.waitForRunning(podId, 120_000)
-      ctx.onProgress?.(proposal.agent, 'Pod running, uploading script...')
+      ctx.onProgress?.(proposal.agent, 'Pod running, installing dependencies...')
+
+      // Ensure PyTorch 2.5+ (needed for enable_gqa) and sentencepiece
+      await this.client.executeCommand(
+        podId,
+        'pip install -q torch==2.5.1+cu124 --index-url https://download.pytorch.org/whl/cu124 && pip install -q sentencepiece',
+        180_000,
+      )
+      ctx.onProgress?.(proposal.agent, 'Dependencies ready, uploading script...')
 
       await this.client.uploadScript(podId, proposal.modifiedSource, `/workspace/${tier2Config.trainScript}`)
       ctx.onProgress?.(proposal.agent, 'Script uploaded, starting training...')
@@ -178,12 +186,14 @@ export class Tier2Runner implements TierRunner {
     const tier2 = ctx.policy.tiers.tier2!
     const parts = [
       'cd /workspace &&',
+      // Single-GPU DDP env vars (required by train_gpt.py)
+      'LOCAL_RANK=0 RANK=0 WORLD_SIZE=1 MASTER_ADDR=localhost MASTER_PORT=29500',
       `MAX_WALLCLOCK_SECONDS=${tier2.maxWallclockSec}`,
       `DATA_PATH=${tier2.dataPath}`,
       `TOKENIZER_PATH=${tier2.tokenizerPath}`,
-      'TRAIN_LOG_EVERY=50',
-      'VAL_LOSS_EVERY=200',
-      `python3 /workspace/${tier2.trainScript}`,
+      'TRAIN_LOG_EVERY=5',
+      'VAL_LOSS_EVERY=0',
+      `python3 /workspace/${tier2.trainScript} 2>&1`,
     ]
     return parts.join(' ')
   }
