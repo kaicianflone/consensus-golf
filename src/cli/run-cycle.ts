@@ -15,7 +15,7 @@ import type { TaxonomyData } from '../memory/technique-coverage.js'
 import { CostTracker } from '../runner/cost-tracker.js'
 import type { CycleContext } from '../loop/context.js'
 
-function parseArgs(): { cycles: number; boardId: string; dryRun: boolean; budgetSeconds?: number; enableTier2: boolean; gpuBudget?: number } {
+function parseArgs(): { cycles: number; boardId: string; dryRun: boolean; budgetSeconds?: number; enableTier2: boolean; gpuBudget?: number; overnight: boolean } {
   const argv = process.argv.slice(2)
   let cycles = 1
   let boardId = 'pgolf-main'
@@ -23,6 +23,7 @@ function parseArgs(): { cycles: number; boardId: string; dryRun: boolean; budget
   let budgetSeconds: number | undefined
   let enableTier2 = false
   let gpuBudget: number | undefined
+  let overnight = false
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
@@ -38,14 +39,26 @@ function parseArgs(): { cycles: number; boardId: string; dryRun: boolean; budget
       enableTier2 = true
     } else if (arg === '--gpu-budget' && argv[i + 1] !== undefined) {
       gpuBudget = parseFloat(argv[++i])
+    } else if (arg === '--overnight') {
+      overnight = true
     }
   }
 
-  return { cycles, boardId, dryRun, budgetSeconds, enableTier2, gpuBudget }
+  // Overnight mode validation
+  if (overnight) {
+    if (gpuBudget === undefined) {
+      console.error('Error: --overnight requires --gpu-budget (refuse to run unattended without a spending cap)')
+      process.exit(1)
+    }
+    enableTier2 = true
+    if (cycles === 1) cycles = 999  // effectively unlimited
+  }
+
+  return { cycles, boardId, dryRun, budgetSeconds, enableTier2, gpuBudget, overnight }
 }
 
 async function main(): Promise<void> {
-  const { cycles, boardId, dryRun, budgetSeconds, enableTier2, gpuBudget } = parseArgs()
+  const { cycles, boardId, dryRun, budgetSeconds, enableTier2, gpuBudget, overnight } = parseArgs()
 
   const policyRaw = JSON.parse(fs.readFileSync('config/default-policy.json', 'utf8'))
   const pgolfRaw = JSON.parse(fs.readFileSync('config/pgolf.json', 'utf8'))
@@ -109,7 +122,7 @@ async function main(): Promise<void> {
     costTracker,
   }
 
-  await runScheduled(ctx, { cycles, budgetSeconds }, boardId)
+  await runScheduled(ctx, { cycles, budgetSeconds, overnight }, boardId)
 }
 
 main().catch((err) => {
