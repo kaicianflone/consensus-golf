@@ -39,11 +39,13 @@ export class RunPodsClient {
     this.endpoint = `https://api.runpod.io/graphql?api_key=${apiKey}`
   }
 
-  private async graphql<T>(query: string): Promise<T> {
+  private async graphql<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
+    const body: Record<string, unknown> = { query }
+    if (variables) body.variables = variables
     const res = await fetch(this.endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query }),
+      body: JSON.stringify(body),
     })
     if (!res.ok) {
       throw new RunPodsApiError(`RunPods API HTTP ${res.status}: ${res.statusText}`)
@@ -59,61 +61,40 @@ export class RunPodsClient {
   }
 
   async createPod(config: RunPodsConfig, name: string, options?: { dockerArgs?: string; env?: Array<{ key: string; value: string }> }): Promise<string> {
-    const templatePart = config.templateId ? `templateId: "${config.templateId}"` : `imageName: "${config.containerImage}"`
-    const volumePart = config.volumeId ? `networkVolumeId: "${config.volumeId}"` : ''
-    const volumeMountPath = config.volumeMountPath ?? '/workspace'
-    const containerDisk = config.containerDiskInGb ?? 40
-    const envEntries = options?.env ?? []
-    const envStr = envEntries.length > 0
-      ? `env: [${envEntries.map(e => `{ key: ${JSON.stringify(e.key)}, value: ${JSON.stringify(e.value)} }`).join(', ')}]`
-      : ''
-    const dockerArgsStr = options?.dockerArgs ? `dockerArgs: ${JSON.stringify(options.dockerArgs)}` : ''
+    const input: Record<string, unknown> = {
+      cloudType: 'ALL',
+      gpuCount: config.gpuCount,
+      containerDiskInGb: config.containerDiskInGb ?? 40,
+      gpuTypeId: config.gpuType,
+      name,
+      ports: '22/tcp',
+      volumeMountPath: config.volumeMountPath ?? '/workspace',
+    }
+    if (config.templateId) input.templateId = config.templateId
+    else input.imageName = config.containerImage
+    if (config.volumeId) input.networkVolumeId = config.volumeId
+    if (options?.env?.length) input.env = options.env
+    if (options?.dockerArgs) input.dockerArgs = options.dockerArgs
 
-    const query = `mutation {
-      podFindAndDeployOnDemand(input: {
-        cloudType: ALL
-        gpuCount: ${config.gpuCount}
-        containerDiskInGb: ${containerDisk}
-        gpuTypeId: "${config.gpuType}"
-        name: "${name}"
-        ${templatePart}
-        ports: "22/tcp"
-        volumeMountPath: "${volumeMountPath}"
-        ${volumePart}
-        ${envStr}
-        ${dockerArgsStr}
-      }) {
-        id
-        desiredStatus
-        costPerHr
-        machine { podHostId }
+    const query = `mutation CreatePod($input: PodFindAndDeployOnDemandInput!) {
+      podFindAndDeployOnDemand(input: $input) {
+        id desiredStatus costPerHr machine { podHostId }
       }
     }`
 
-    const data = await this.graphql<{ podFindAndDeployOnDemand: { id: string } }>(query)
+    const data = await this.graphql<{ podFindAndDeployOnDemand: { id: string } }>(query, { input })
     return data.podFindAndDeployOnDemand.id
   }
 
   async getPodStatus(podId: string): Promise<PodInfo> {
-    const query = `query {
-      pod(input: { podId: "${podId}" }) {
-        id
-        desiredStatus
-        costPerHr
-        runtime {
-          uptimeInSeconds
-          ports {
-            ip
-            isIpPublic
-            privatePort
-            publicPort
-            type
-          }
-        }
+    const query = `query GetPod($input: PodInput!) {
+      pod(input: $input) {
+        id desiredStatus costPerHr
+        runtime { uptimeInSeconds ports { ip isIpPublic privatePort publicPort type } }
       }
     }`
 
-    const data = await this.graphql<{ pod: PodInfo }>(query)
+    const data = await this.graphql<{ pod: PodInfo }>(query, { input: { podId } })
     return data.pod
   }
 
@@ -133,22 +114,18 @@ export class RunPodsClient {
   }
 
   async terminatePod(podId: string): Promise<void> {
-    const query = `mutation { podTerminate(input: { podId: "${podId}" }) }`
-    await this.graphql(query)
+    const query = `mutation TerminatePod($input: PodTerminateInput!) { podTerminate(input: $input) }`
+    await this.graphql(query, { input: { podId } })
   }
 
   async stopPod(podId: string): Promise<void> {
-    const query = `mutation { podStop(input: { podId: "${podId}" }) { id desiredStatus } }`
-    await this.graphql(query)
+    const query = `mutation StopPod($input: PodStopInput!) { podStop(input: $input) { id desiredStatus } }`
+    await this.graphql(query, { input: { podId } })
   }
 
-  /**
-   * Get the SSH address for a pod (podHostId@ssh.runpod.io).
-   * The podHostId includes a machine suffix that the SSH proxy requires.
-   */
   async getSshAddress(podId: string): Promise<string> {
-    const query = `query { pod(input: { podId: "${podId}" }) { machine { podHostId } } }`
-    const data = await this.graphql<{ pod: { machine: { podHostId: string } } }>(query)
+    const query = `query GetPodSsh($input: PodInput!) { pod(input: $input) { machine { podHostId } } }`
+    const data = await this.graphql<{ pod: { machine: { podHostId: string } } }>(query, { input: { podId } })
     return `${data.pod.machine.podHostId}@ssh.runpod.io`
   }
 
@@ -205,6 +182,10 @@ export class RunPodsClient {
    * Upload file content to a pod via base64 encoding over SSH.
    */
   async uploadScript(podId: string, content: string, remotePath: string): Promise<void> {
+    // Validate remotePath to prevent shell injection
+    if (!/^[a-zA-Z0-9_.\-\/]+$/.test(remotePath)) {
+      throw new RunPodsApiError(`Unsafe remote path: ${remotePath}`)
+    }
     const b64 = Buffer.from(content).toString('base64')
     // Split into chunks to avoid shell line length limits
     const chunkSize = 50000

@@ -212,16 +212,22 @@ export class Tier2Runner implements TierRunner {
 
   private buildTrainCommand(ctx: TierRunnerContext): string {
     const tier2 = ctx.policy.tiers.tier2!
+    // Validate all config paths against safe characters to prevent shell injection
+    const safePath = /^[a-zA-Z0-9_.\-\/]+$/
+    for (const [name, value] of [['dataPath', tier2.dataPath], ['tokenizerPath', tier2.tokenizerPath], ['trainScript', tier2.trainScript]] as const) {
+      if (!safePath.test(value)) {
+        throw new Error(`Unsafe characters in tier2 config ${name}: ${value}`)
+      }
+    }
     const parts = [
       'cd /workspace &&',
-      // Single-GPU DDP env vars (required by train_gpt.py)
       'LOCAL_RANK=0 RANK=0 WORLD_SIZE=1 MASTER_ADDR=localhost MASTER_PORT=29500',
-      `MAX_WALLCLOCK_SECONDS=${tier2.maxWallclockSec}`,
-      `DATA_PATH=${tier2.dataPath}`,
-      `TOKENIZER_PATH=${tier2.tokenizerPath}`,
+      `MAX_WALLCLOCK_SECONDS=${Math.floor(tier2.maxWallclockSec)}`,
+      `DATA_PATH='${tier2.dataPath}'`,
+      `TOKENIZER_PATH='${tier2.tokenizerPath}'`,
       'TRAIN_LOG_EVERY=5',
       'VAL_LOSS_EVERY=0',
-      `python3 /workspace/${tier2.trainScript} 2>&1`,
+      `python3 '/workspace/${tier2.trainScript}' 2>&1`,
     ]
     return parts.join(' ')
   }

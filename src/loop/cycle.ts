@@ -362,7 +362,7 @@ export async function runCycle(
         audit.write(cycleNum, 'precedent_created', precedent.id, `Precedent created: [${precedent.outcome}] ${precedent.summary}`, { outcome: precedent.outcome, family: precedent.family, delta: precedent.metrics.delta }, proposal.agent)
 
         const currentBoardState = board.load(boardId) ?? currentBoard
-        if (run.status === 'passed' && shouldMerge(run.metrics, currentBoardState, config.policy.merge, config.pgolf.maxArtifactBytes)) {
+        if (postGate.passed && run.status === 'passed' && shouldMerge(run.metrics, currentBoardState, config.policy.merge, config.pgolf.maxArtifactBytes)) {
           board.updateBest(boardId, {
             valBpb: run.metrics.valBpb!,
             artifactBytes: run.metrics.artifactBytes ?? currentBoardState.currentBest.artifactBytes,

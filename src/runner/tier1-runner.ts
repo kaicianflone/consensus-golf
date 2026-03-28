@@ -11,16 +11,27 @@ export class Tier1Runner implements TierRunner {
   async run(proposal: Proposal, ctx: TierRunnerContext): Promise<TierRunResult> {
     const preGate: TierGateResult = { passed: true, reason: 'Passed tier 0' }
 
-    const run = await runExperiment(
-      proposal,
-      ctx.sourceCode,
-      ctx.policy,
-      ctx.pgolf,
-      ctx.workDir,
-      ctx.onProgress
-        ? (line: string) => ctx.onProgress!(proposal.agent, line)
-        : undefined,
-    )
+    let run: ExperimentRun
+    try {
+      run = await runExperiment(
+        proposal,
+        ctx.sourceCode,
+        ctx.policy,
+        ctx.pgolf,
+        ctx.workDir,
+        ctx.onProgress
+          ? (line: string) => ctx.onProgress!(proposal.agent, line)
+          : undefined,
+      )
+    } catch (err) {
+      return {
+        tier: 1,
+        proposal,
+        preGate,
+        postGate: { passed: false, reason: `Execution error: ${String(err)}`, riskScore: 1.0 },
+        promotable: false,
+      }
+    }
 
     const curveSignal = analyzeLossCurve(run.metrics.stepLosses ?? [])
     const baselineComparison = ctx.baselineCurve

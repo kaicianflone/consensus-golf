@@ -54,7 +54,9 @@ export async function runScheduled(
         const reportPath = `data/reports/${boardId}-${new Date().toISOString().replace(/[:.]/g, '-')}.md`
         fs.writeFileSync(reportPath, formatSummaryMarkdown(summary))
         console.log(`Report saved: ${reportPath}`)
-      } catch { /* best effort */ }
+      } catch (err) {
+        console.error('[SIGINT] Failed to generate summary:', err)
+      }
     }
 
     process.exit(130)

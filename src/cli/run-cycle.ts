@@ -50,8 +50,14 @@ function parseArgs(): { cycles: number; boardId: string; dryRun: boolean; budget
       console.error('Error: --overnight requires --gpu-budget (refuse to run unattended without a spending cap)')
       process.exit(1)
     }
+    if (!Number.isFinite(gpuBudget) || gpuBudget <= 0) {
+      console.error('Error: --gpu-budget must be a positive number')
+      process.exit(1)
+    }
     enableTier2 = true
-    if (cycles === 1) cycles = 999  // effectively unlimited
+    if (cycles === 1) cycles = 999
+    // Default wall-clock cap of 12 hours for overnight runs if not explicitly set
+    if (budgetSeconds === undefined) budgetSeconds = 43200
   }
 
   return { cycles, boardId, dryRun, budgetSeconds, enableTier2, gpuBudget, overnight }

@@ -21,7 +21,7 @@ export const Tier2ConfigSchema = z.object({
   tokenizerPath: z.string().default('/workspace/data/tokenizers/fineweb_1024_bpe.model'),
   trainScript: z.string().default('train_gpt.py'),
   maxWallclockSec: z.number().default(900),
-  estimatedCostPerRun: z.number().default(1.0),
+  estimatedCostPerRun: z.number().positive().default(1.0),
   enabled: z.boolean().default(false),
 })
 export type Tier2Config = z.infer<typeof Tier2ConfigSchema>

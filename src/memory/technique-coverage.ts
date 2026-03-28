@@ -85,8 +85,10 @@ export class TechniqueCoverageTracker {
 
     for (const [familyKey, family] of Object.entries(this.taxonomy.families)) {
       const familyTags = family.tags.map(t => t.toLowerCase())
+      // Match only if a precedent token contains a taxonomy tag (not bidirectional)
+      // This prevents short tokens like "lr" from matching everything
       const hasMatch = familyTags.some(tag =>
-        precedentTokens.some(token => token.includes(tag) || tag.includes(token))
+        tag.length >= 3 && precedentTokens.some(token => token.includes(tag))
       )
       if (hasMatch) {
         matched.push(familyKey)

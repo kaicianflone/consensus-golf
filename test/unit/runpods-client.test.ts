@@ -57,7 +57,8 @@ describe('RunPodsClient', () => {
 
     const callBody = JSON.parse(vi.mocked(fetch).mock.calls[0][1]?.body as string)
     expect(callBody.query).toContain('podFindAndDeployOnDemand')
-    expect(callBody.query).toContain('NVIDIA H100 80GB HBM3')
+    // Variables-based: GPU type should be in variables, not query string
+    expect(callBody.variables.input.gpuTypeId).toBe('NVIDIA H100 80GB HBM3')
   })
 
   it('getPodStatus returns parsed PodInfo', async () => {
@@ -157,7 +158,8 @@ describe('RunPodsClient', () => {
 
     const callBody = JSON.parse(vi.mocked(fetch).mock.calls[0][1]?.body as string)
     expect(callBody.query).toContain('podTerminate')
-    expect(callBody.query).toContain('pod-term')
+    // Variables-based: podId should be in variables, not query string
+    expect(callBody.variables.input.podId).toBe('pod-term')
   })
 
   it('RunPodsApiError thrown on HTTP errors', async () => {
