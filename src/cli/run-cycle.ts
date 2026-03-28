@@ -12,14 +12,17 @@ import { buildConsensusToolsConfig } from '../adapter/consensus-config.js'
 import { BaselineManager } from '../persistence/baseline-manager.js'
 import { TechniqueCoverageTracker } from '../memory/technique-coverage.js'
 import type { TaxonomyData } from '../memory/technique-coverage.js'
+import { CostTracker } from '../runner/cost-tracker.js'
 import type { CycleContext } from '../loop/context.js'
 
-function parseArgs(): { cycles: number; boardId: string; dryRun: boolean; budgetSeconds?: number } {
+function parseArgs(): { cycles: number; boardId: string; dryRun: boolean; budgetSeconds?: number; enableTier2: boolean; gpuBudget?: number } {
   const argv = process.argv.slice(2)
   let cycles = 1
   let boardId = 'pgolf-main'
   let dryRun = false
   let budgetSeconds: number | undefined
+  let enableTier2 = false
+  let gpuBudget: number | undefined
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
@@ -31,14 +34,18 @@ function parseArgs(): { cycles: number; boardId: string; dryRun: boolean; budget
       dryRun = true
     } else if (arg === '--budget-seconds' && argv[i + 1] !== undefined) {
       budgetSeconds = parseInt(argv[++i], 10)
+    } else if (arg === '--tier2') {
+      enableTier2 = true
+    } else if (arg === '--gpu-budget' && argv[i + 1] !== undefined) {
+      gpuBudget = parseFloat(argv[++i])
     }
   }
 
-  return { cycles, boardId, dryRun, budgetSeconds }
+  return { cycles, boardId, dryRun, budgetSeconds, enableTier2, gpuBudget }
 }
 
 async function main(): Promise<void> {
-  const { cycles, boardId, dryRun, budgetSeconds } = parseArgs()
+  const { cycles, boardId, dryRun, budgetSeconds, enableTier2, gpuBudget } = parseArgs()
 
   const policyRaw = JSON.parse(fs.readFileSync('config/default-policy.json', 'utf8'))
   const pgolfRaw = JSON.parse(fs.readFileSync('config/pgolf.json', 'utf8'))
@@ -83,6 +90,10 @@ async function main(): Promise<void> {
   const coverageTracker = new TechniqueCoverageTracker(taxonomy)
   const baseline = new BaselineManager('data/baselines')
 
+  const costTracker = enableTier2 && gpuBudget !== undefined
+    ? new CostTracker(gpuBudget)
+    : undefined
+
   const ctx: CycleContext = {
     config: { policy, pgolf, agents, consensus: consensusConfig },
     llm,
@@ -95,6 +106,7 @@ async function main(): Promise<void> {
     coverageTracker,
     workDir: 'data/work',
     dryRun,
+    costTracker,
   }
 
   await runScheduled(ctx, { cycles, budgetSeconds }, boardId)

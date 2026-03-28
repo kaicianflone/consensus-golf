@@ -53,6 +53,10 @@ export class PipelineOrchestrator {
     return results
   }
 
+  hasTier(tierNumber: TierNumber): boolean {
+    return this.runnerMap.has(tierNumber)
+  }
+
   getPromoted(tier1Results: TierRunResult[], maxPromotions: number): TierRunResult[] {
     return tier1Results
       .filter(r => r.promotable)
