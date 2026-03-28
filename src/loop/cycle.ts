@@ -98,7 +98,9 @@ export async function runCycle(
       })
       progress.phase(`Baseline captured: descent_rate=${baselineSignal.descentRate.toFixed(6)}, loss_drop=${baselineSignal.lossDrop.toFixed(4)}`)
     } catch (err) {
-      progress.phase(`Baseline capture failed: ${String(err)} — continuing without baseline`)
+      const errMsg = err instanceof Error ? err.stack ?? err.message : String(err)
+      console.error('[BASELINE ERROR]', errMsg)
+      progress.phase(`Baseline capture failed: ${errMsg} — continuing without baseline`)
     }
     progress.blank()
   }
