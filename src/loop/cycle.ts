@@ -20,14 +20,36 @@ import { PipelineOrchestrator } from '../runner/pipeline.js'
 import type { TierRunnerContext, TierRunResult } from '../runner/tier-runner.js'
 import { getExplorerForCycle } from '../agents/exploration.js'
 import type { AgentContextOptions } from '../agents/context.js'
+import type { CycleResult } from './summary-report.js'
 
 export async function runCycle(
   ctx: CycleContext,
   cycleNumber: number,
   totalCycles: number,
   boardId: string,
-): Promise<void> {
+): Promise<CycleResult> {
+  const cycleStartTime = Date.now()
   const { config, llm, audit, precedents, board, consensus, progress, baseline, coverageTracker, workDir, dryRun } = ctx
+
+  // Track cycle results for overnight summary
+  const cycleStats = {
+    proposalsGenerated: 0,
+    tier0Passed: 0,
+    tier1Passed: 0,
+    tier2Attempted: 0,
+    tier2Passed: 0,
+    bestValBpb: undefined as number | undefined,
+    bestTechnique: undefined as string | undefined,
+    bestProposalId: undefined as string | undefined,
+  }
+
+  function buildCycleResult(): CycleResult {
+    return {
+      cycleNumber,
+      ...cycleStats,
+      wallclockSec: (Date.now() - cycleStartTime) / 1000,
+    }
+  }
 
   progress.phase(`=== Cycle ${cycleNumber}/${totalCycles} ===`)
   progress.blank()
@@ -155,6 +177,7 @@ export async function runCycle(
       progress.agentResult(agentName, `proposal generated: ${result.value.title}`, true)
       audit.write(cycleNum, 'proposal_created', result.value.id, `${agentName} generated proposal: ${result.value.title}`, { title: result.value.title, category: result.value.category }, agentName)
       validProposals.push(result.value)
+      cycleStats.proposalsGenerated++
     } else {
       progress.agentResult(agentName, `failed: ${String(result.reason)}`, false)
       try {
@@ -199,6 +222,7 @@ export async function runCycle(
     if (result.promotable) {
       progress.agentResult(result.proposal.agent, `compliance passed (risk: ${result.postGate.riskScore?.toFixed(2) ?? 'N/A'})`, true)
       compliantProposals.push(result.proposal)
+      cycleStats.tier0Passed++
     } else {
       progress.agentResult(result.proposal.agent, `compliance failed: ${result.postGate.reason}`, false)
       try {
@@ -216,7 +240,7 @@ export async function runCycle(
   if (compliantProposals.length === 0) {
     progress.phase('No compliant proposals. Ending cycle.')
     await printBalanceReport(ctx, agentIds, balancesBefore, cycleNumber, totalCycles)
-    return
+    return buildCycleResult()
   }
 
   // ─── PHASE 3: Post jobs + submit + judge + vote (one job per proposal) ─
@@ -291,7 +315,7 @@ export async function runCycle(
       progress.phase('No proposals approved for execution.')
     }
     await printBalanceReport(ctx, agentIds, balancesBefore, cycleNumber, totalCycles)
-    return
+    return buildCycleResult()
   }
 
   progress.phase('Executing approved proposals (Tier 1)...')
@@ -326,6 +350,7 @@ export async function runCycle(
 
       // Gate result
       progress.agentResult(proposal.agent, `tier 1 gate: ${postGate.passed ? 'PASSED' : 'FAILED'} — ${postGate.reason}`, postGate.passed)
+      if (postGate.passed) cycleStats.tier1Passed++
     }
 
     // Result judging + merge decision (only for runs that completed)
@@ -345,6 +370,11 @@ export async function runCycle(
             proposalId: proposal.id,
           })
           progress.agentResult(proposal.agent, 'MERGED: new best result!', true)
+          if (run.metrics.valBpb !== undefined && (cycleStats.bestValBpb === undefined || run.metrics.valBpb < cycleStats.bestValBpb)) {
+            cycleStats.bestValBpb = run.metrics.valBpb
+            cycleStats.bestTechnique = proposal.title
+            cycleStats.bestProposalId = proposal.id
+          }
           audit.write(cycleNum, 'baseline_updated', boardId, `Board updated with new best from proposal ${proposal.id}`, { valBpb: run.metrics.valBpb, artifactBytes: run.metrics.artifactBytes, proposalId: proposal.id }, proposal.agent)
 
           try {
@@ -375,6 +405,7 @@ export async function runCycle(
     progress.blank()
     progress.phase(`Executing ${promoted.length} promoted proposal(s) on RunPods (Tier 2)...`)
     const tier2Results = await pipeline.runTier(2, promoted.map(r => r.proposal), tierCtx, cycleNum)
+    cycleStats.tier2Attempted = tier2Results.length
 
     for (const tierResult of tier2Results) {
       const { proposal, run, curveSignal, baselineComparison, postGate } = tierResult
@@ -387,6 +418,7 @@ export async function runCycle(
           progress.metric('val_bpb', run.metrics.valBpb, updatedBoard.baseline.valBpb)
         }
         progress.agentResult(proposal.agent, `tier 2 gate: ${postGate.passed ? 'PASSED' : 'FAILED'} — ${postGate.reason}`, postGate.passed)
+        if (postGate.passed) cycleStats.tier2Passed++
 
         // Result judging + merge (same as tier 1)
         try {
@@ -404,6 +436,11 @@ export async function runCycle(
               proposalId: proposal.id,
             })
             progress.agentResult(proposal.agent, 'MERGED from Tier 2: new best result!', true)
+            if (run.metrics.valBpb !== undefined && (cycleStats.bestValBpb === undefined || run.metrics.valBpb < cycleStats.bestValBpb)) {
+              cycleStats.bestValBpb = run.metrics.valBpb
+              cycleStats.bestTechnique = proposal.title
+              cycleStats.bestProposalId = proposal.id
+            }
             audit.write(cycleNum, 'baseline_updated', boardId, `Board updated from Tier 2 proposal ${proposal.id}`, { valBpb: run.metrics.valBpb, artifactBytes: run.metrics.artifactBytes, proposalId: proposal.id, tier: 2 }, proposal.agent)
 
             try {
@@ -441,6 +478,7 @@ export async function runCycle(
 
   progress.blank()
   await printBalanceReport(ctx, agentIds, balancesBefore, cycleNumber, totalCycles)
+  return buildCycleResult()
 }
 
 async function printBalanceReport(
