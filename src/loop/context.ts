@@ -7,6 +7,7 @@ import type { ProgressReporter } from './progress.js'
 import type { ConsensusBridge } from '../adapter/consensus-bridge.js'
 import type { BaselineManager } from '../persistence/baseline-manager.js'
 import type { TechniqueCoverageTracker } from '../memory/technique-coverage.js'
+import type { CostTracker } from '../runner/cost-tracker.js'
 
 export interface CycleContext {
   config: {
@@ -25,4 +26,5 @@ export interface CycleContext {
   coverageTracker: TechniqueCoverageTracker
   workDir: string
   dryRun: boolean
+  costTracker?: CostTracker
 }

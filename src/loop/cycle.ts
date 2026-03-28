@@ -13,8 +13,11 @@ import { runExperiment } from '../runner/sandbox.js'
 import { analyzeLossCurve, compareToBaseline } from '../runner/loss-curve-analyzer.js'
 import { Tier0Runner } from '../runner/tier0-runner.js'
 import { Tier1Runner } from '../runner/tier1-runner.js'
+import { Tier2Runner } from '../runner/tier2-runner.js'
+import { RunPodsClient } from '../runner/runpods-client.js'
+import { CostTracker } from '../runner/cost-tracker.js'
 import { PipelineOrchestrator } from '../runner/pipeline.js'
-import type { TierRunnerContext } from '../runner/tier-runner.js'
+import type { TierRunnerContext, TierRunResult } from '../runner/tier-runner.js'
 import { getExplorerForCycle } from '../agents/exploration.js'
 import type { AgentContextOptions } from '../agents/context.js'
 
@@ -172,7 +175,12 @@ export async function runCycle(
 
   const tier0 = new Tier0Runner()
   const tier1 = new Tier1Runner()
-  const pipeline = new PipelineOrchestrator([tier0, tier1], audit)
+  const runners: Array<InstanceType<typeof Tier0Runner> | InstanceType<typeof Tier1Runner> | Tier2Runner> = [tier0, tier1]
+  if (config.policy.tiers.tier2?.enabled && process.env.RUNPOD_API_KEY) {
+    const rpClient = new RunPodsClient(process.env.RUNPOD_API_KEY)
+    runners.push(new Tier2Runner(rpClient, ctx.costTracker ?? new CostTracker(50)))
+  }
+  const pipeline = new PipelineOrchestrator(runners, audit)
 
   const tierCtx: TierRunnerContext = {
     sourceCode,
@@ -363,8 +371,72 @@ export async function runCycle(
     progress.popIndent()
   }
 
-  if (promoted.length > 0) {
-    progress.phase(`Tier 1 promoted ${promoted.length} proposal(s) for future Tier 2`)
+  if (promoted.length > 0 && pipeline.hasTier(2)) {
+    progress.blank()
+    progress.phase(`Executing ${promoted.length} promoted proposal(s) on RunPods (Tier 2)...`)
+    const tier2Results = await pipeline.runTier(2, promoted.map(r => r.proposal), tierCtx, cycleNum)
+
+    for (const tierResult of tier2Results) {
+      const { proposal, run, curveSignal, baselineComparison, postGate } = tierResult
+      progress.blank()
+      progress.phase(`  Tier 2 Result: ${proposal.title} [${proposal.agent}]`)
+      progress.pushIndent()
+
+      if (run) {
+        if (run.metrics.valBpb !== undefined) {
+          progress.metric('val_bpb', run.metrics.valBpb, updatedBoard.baseline.valBpb)
+        }
+        progress.agentResult(proposal.agent, `tier 2 gate: ${postGate.passed ? 'PASSED' : 'FAILED'} — ${postGate.reason}`, postGate.passed)
+
+        // Result judging + merge (same as tier 1)
+        try {
+          const currentBoard = board.load(boardId) ?? updatedBoard
+          const precedent = await judgeResult(llm, proposal, run, currentBoard, config.agents.judgeMaxTokens)
+          precedents.append(precedent)
+          audit.write(cycleNum, 'precedent_created', precedent.id, `Precedent created: [${precedent.outcome}] ${precedent.summary}`, { outcome: precedent.outcome, family: precedent.family, delta: precedent.metrics.delta, tier: 2 }, proposal.agent)
+
+          const currentBoardState = board.load(boardId) ?? currentBoard
+          if (run.status === 'passed' && shouldMerge(run.metrics, currentBoardState, config.policy.merge, config.pgolf.maxArtifactBytes)) {
+            board.updateBest(boardId, {
+              valBpb: run.metrics.valBpb!,
+              artifactBytes: run.metrics.artifactBytes ?? currentBoardState.currentBest.artifactBytes,
+              commitRef: run.id,
+              proposalId: proposal.id,
+            })
+            progress.agentResult(proposal.agent, 'MERGED from Tier 2: new best result!', true)
+            audit.write(cycleNum, 'baseline_updated', boardId, `Board updated from Tier 2 proposal ${proposal.id}`, { valBpb: run.metrics.valBpb, artifactBytes: run.metrics.artifactBytes, proposalId: proposal.id, tier: 2 }, proposal.agent)
+
+            try {
+              await consensus.rewardAgent(proposal.agent, config.consensus.rewards.merge, 'tier 2 merge accepted')
+            } catch (err) {
+              progress.agentResult(proposal.agent, `ledger reward failed: ${String(err)}`, false)
+            }
+          } else {
+            try {
+              if (precedent.outcome === 'positive' || precedent.outcome === 'negative') {
+                await consensus.rewardAgent(proposal.agent, config.consensus.rewards.usefulResult, `useful tier 2 ${precedent.outcome} result`)
+              } else if (precedent.outcome === 'invalid') {
+                await consensus.slashAgent(proposal.agent, config.consensus.rewards.penalizeInvalid, 'invalid tier 2 experiment')
+              }
+            } catch (err) {
+              progress.agentResult(proposal.agent, `ledger update failed: ${String(err)}`, false)
+            }
+          }
+        } catch (err) {
+          progress.agentResult(proposal.agent, `result judging failed: ${String(err)}`, false)
+        }
+      }
+
+      progress.popIndent()
+    }
+
+    // Report cost
+    if (ctx.costTracker) {
+      const summary = ctx.costTracker.getSummary()
+      progress.phase(`GPU spend: $${summary.spent.toFixed(2)} / $${summary.budget.toFixed(2)} budget`)
+    }
+  } else if (promoted.length > 0) {
+    progress.phase(`Tier 1 promoted ${promoted.length} proposal(s) (Tier 2 not enabled)`)
   }
 
   progress.blank()

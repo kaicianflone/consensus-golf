@@ -11,9 +11,25 @@ export const Tier1ConfigSchema = z.object({
 })
 export type Tier1Config = z.infer<typeof Tier1ConfigSchema>
 
+export const Tier2ConfigSchema = z.object({
+  gpuType: z.string().default('NVIDIA H100 80GB HBM3'),
+  gpuCount: z.number().default(1),
+  templateId: z.string().default(''),
+  containerImage: z.string().default('runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04'),
+  volumeId: z.string().default(''),
+  dataPath: z.string().default('/workspace/data/datasets/fineweb10B_sp1024'),
+  tokenizerPath: z.string().default('/workspace/data/tokenizers/fineweb_1024_bpe.model'),
+  trainScript: z.string().default('train_gpt.py'),
+  maxWallclockSec: z.number().default(900),
+  estimatedCostPerRun: z.number().default(1.0),
+  enabled: z.boolean().default(false),
+})
+export type Tier2Config = z.infer<typeof Tier2ConfigSchema>
+
 export const TiersConfigSchema = z.object({
   tier0: Tier0ConfigSchema.default({}),
   tier1: Tier1ConfigSchema.default({}),
+  tier2: Tier2ConfigSchema.default({}),
 }).default({})
 
 export const PolicyConfigSchema = z.object({

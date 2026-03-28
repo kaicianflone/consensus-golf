@@ -13,6 +13,19 @@
   },
   "tiers": {
     "tier0": { "riskThreshold": 0.7 },
-    "tier1": { "descentRateThreshold": 0.8, "maxPromotions": 2 }
+    "tier1": { "descentRateThreshold": 0.8, "maxPromotions": 2 },
+    "tier2": {
+      "gpuType": "NVIDIA H100 80GB HBM3",
+      "gpuCount": 1,
+      "templateId": "",
+      "containerImage": "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04",
+      "volumeId": "",
+      "dataPath": "/workspace/data/datasets/fineweb10B_sp1024",
+      "tokenizerPath": "/workspace/data/tokenizers/fineweb_1024_bpe.model",
+      "trainScript": "train_gpt.py",
+      "maxWallclockSec": 900,
+      "estimatedCostPerRun": 1.0,
+      "enabled": false
+    }
   }
 }
