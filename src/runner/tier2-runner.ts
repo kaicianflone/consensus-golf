@@ -33,18 +33,45 @@ export class Tier2Runner implements TierRunner {
 
     try {
       const runId = ulid()
-      podId = await this.client.createPod(
-        {
-          gpuType: tier2Config.gpuType,
-          gpuCount: tier2Config.gpuCount,
-          templateId: tier2Config.templateId,
-          containerImage: tier2Config.containerImage,
-          volumeId: tier2Config.volumeId,
-        },
-        `cgolf-${runId.slice(-8)}`,
-      )
 
-      ctx.onProgress?.(proposal.agent, `Pod created: ${podId}, waiting for RUNNING...`)
+      // Try GPU types in priority order — H100 is often sold out
+      const gpuFallbacks = [
+        tier2Config.gpuType,
+        'NVIDIA A100 80GB PCIe',
+        'NVIDIA A100-SXM4-80GB',
+        'NVIDIA GeForce RTX 4090',
+      ]
+      // Deduplicate while preserving order
+      const gpuTypes = [...new Set(gpuFallbacks)]
+
+      for (let i = 0; i < gpuTypes.length; i++) {
+        try {
+          ctx.onProgress?.(proposal.agent, `Trying GPU: ${gpuTypes[i]}...`)
+          podId = await this.client.createPod(
+            {
+              gpuType: gpuTypes[i],
+              gpuCount: tier2Config.gpuCount,
+              templateId: tier2Config.templateId,
+              containerImage: tier2Config.containerImage,
+              volumeId: tier2Config.volumeId,
+            },
+            `cgolf-${runId.slice(-8)}`,
+          )
+          ctx.onProgress?.(proposal.agent, `Pod created on ${gpuTypes[i]}: ${podId}`)
+          break
+        } catch (err) {
+          const isSupplyConstraint = String(err).includes('SUPPLY_CONSTRAINT')
+          if (isSupplyConstraint && i < gpuTypes.length - 1) {
+            ctx.onProgress?.(proposal.agent, `${gpuTypes[i]} unavailable, trying fallback...`)
+            continue
+          }
+          throw err
+        }
+      }
+
+      if (!podId) throw new Error('No GPU available across all fallback types')
+
+      ctx.onProgress?.(proposal.agent, `Waiting for RUNNING...`)
 
       await this.client.waitForRunning(podId, 120_000)
       ctx.onProgress?.(proposal.agent, 'Pod running, installing dependencies...')
@@ -121,7 +148,7 @@ export class Tier2Runner implements TierRunner {
         }
       }
     } finally {
-      // ALWAYS terminate pod and record cost
+      // ALWAYS terminate pod if one was created
       if (podId) {
         try {
           await this.client.terminatePod(podId)
@@ -129,8 +156,9 @@ export class Tier2Runner implements TierRunner {
         } catch {
           ctx.onProgress?.(proposal.agent, `WARNING: Failed to terminate pod ${podId}`)
         }
+        // Only charge cost if a pod was actually created
+        this.costTracker.recordSpend(tier2Config.estimatedCostPerRun)
       }
-      this.costTracker.recordSpend(tier2Config.estimatedCostPerRun)
     }
 
     // Analyze loss curve
