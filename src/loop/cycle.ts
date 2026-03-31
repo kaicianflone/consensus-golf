@@ -10,7 +10,8 @@ import { trainingAgent } from '../agents/training.js'
 import { runMultiJudge } from '../judges/judge-personas.js'
 import { judgeResult } from '../judges/result-judge.js'
 import { shouldMerge } from '../policy/merge-policy.js'
-import { runExperiment } from '../runner/sandbox.js'
+import { runExperiment, computeSimpleDiff } from '../runner/sandbox.js'
+import { parseMetrics } from '../runner/metrics-parser.js'
 import { analyzeLossCurve, compareToBaseline } from '../runner/loss-curve-analyzer.js'
 import { Tier0Runner } from '../runner/tier0-runner.js'
 import { Tier1Runner } from '../runner/tier1-runner.js'
@@ -26,6 +27,9 @@ import type { AgentContextOptions } from '../agents/context.js'
 import { FeedbackAggregator } from '../memory/feedback-aggregator.js'
 import { PromotionQueue } from './promotion-queue.js'
 import type { QueueEntry } from './promotion-queue.js'
+import { PodSession } from '../runner/pod-session.js'
+import { ulid } from 'ulid'
+import type { ExperimentRun } from '../schema/experiment.js'
 import type { CycleResult } from './summary-report.js'
 
 export async function runCycle(
@@ -357,25 +361,26 @@ export async function runCycle(
     llm, audit, precedents, board, consensus, progress, config, cycleStats, updatedBoard, boardId, cycleNum,
   })
 
-  // ─── GPU TIERS: availability-aware with promotion queue ──────────
+  // ─── GPU TIERS: PodSession with availability check + promotion queue ──
   if (promoted.length > 0 && pipeline.hasTier(2)) {
     const promoQueue = new PromotionQueue(path.join(workDir, '..'), boardId)
     const rpApiKey = process.env.RUNPOD_API_KEY
     const tier2Config = config.policy.tiers.tier2!
     const gpuTypes = [...new Set([tier2Config.gpuType, 'NVIDIA A100 80GB PCIe', 'NVIDIA A100-SXM4-80GB', 'NVIDIA GeForce RTX 4090'])]
+    const volumes = tier2Config.volumeIds?.length ? tier2Config.volumeIds : [tier2Config.volumeId]
 
     // Check GPU availability before attempting (one lightweight API call)
     let gpusAvailable = false
     if (rpApiKey) {
-      const rpClient = new RunPodsClient(rpApiKey)
-      const available = await rpClient.getAvailableGpuTypes(gpuTypes)
+      const rpCheck = new RunPodsClient(rpApiKey)
+      const available = await rpCheck.getAvailableGpuTypes(gpuTypes)
       gpusAvailable = available.length > 0
       if (gpusAvailable) {
         progress.phase(`GPUs available: ${available.join(', ')}`)
       }
     }
 
-    if (gpusAvailable) {
+    if (gpusAvailable && rpApiKey) {
       // Drain queued proposals first, then run current promotions
       const queued = promoQueue.getForTier(2)
       const allTier2Proposals = [
@@ -386,32 +391,184 @@ export async function runCycle(
         progress.phase(`Draining ${queued.length} queued proposal(s) + ${promoted.length} new promotion(s)`)
       }
 
-      progress.blank()
-      progress.phase(`Executing ${allTier2Proposals.length} proposal(s) on RunPods (Tier 2)...`)
-      const tier2Results = await pipeline.runTier(2, allTier2Proposals, tierCtx, cycleNum)
-      cycleStats.tier2Attempted = tier2Results.length
+      // Run each proposal through Tier 2, reusing pod session for Tier 3
+      for (const proposal of allTier2Proposals) {
+        const session = new PodSession(
+          new RunPodsClient(rpApiKey),
+          ctx.costTracker ?? new CostTracker(50),
+          (agent, line) => progress.agent(agent, line),
+        )
 
-      // Dequeue everything we attempted (pass or fail, doesn't matter)
-      promoQueue.dequeue(allTier2Proposals.map(p => p.id))
+        try {
+          // Acquire pod across all volumes
+          progress.blank()
+          progress.phase(`  Tier 2: ${proposal.title} [${proposal.agent}]`)
+          const acquired = await session.acquire(gpuTypes, volumes, {
+            gpuCount: tier2Config.gpuCount,
+            templateId: tier2Config.templateId,
+            containerImage: tier2Config.containerImage,
+          }, `cgolf-${proposal.id.slice(-8)}`)
 
-      await handleTierResults(tier2Results, 'Tier 2', {
-        llm, audit, precedents, board, consensus, progress, config, cycleStats, updatedBoard, boardId, cycleNum,
-        skipMerge: pipeline.hasTier(3),
-      })
+          if (!acquired) {
+            progress.agentResult(proposal.agent, 'No GPU available, re-queuing', false)
+            promoQueue.enqueue([{
+              proposal, sourceTier: 1, targetTier: 2,
+              queuedAt: new Date().toISOString(), cycleNum,
+            }])
+            continue
+          }
 
-      // Tier 2 -> 3 promotion
-      const tier2MaxPromotions = config.policy.tiers.tier2?.maxPromotions ?? 1
-      const promotedToTier3 = pipeline.getPromotedByBpb(tier2Results, tier2MaxPromotions)
-      if (promotedToTier3.length > 0 && pipeline.hasTier(3)) {
-        progress.blank()
-        progress.phase(`Executing ${promotedToTier3.length} promoted proposal(s) on multi-GPU (Tier 3)...`)
-        const tier3Results = await pipeline.runTier(3, promotedToTier3.map(r => r.proposal), tierCtx, cycleNum)
-        cycleStats.tier3Attempted = tier3Results.length
+          await session.waitReady()
+          await session.ensureDeps()
+          await session.ensureData(tier2Config.dataPath, tier2Config.tokenizerPath)
+          session.recordCost(tier2Config.estimatedCostPerRun)
 
-        await handleTierResults(tier3Results, 'Tier 3', {
-          llm, audit, precedents, board, consensus, progress, config, cycleStats, updatedBoard, boardId, cycleNum,
-        })
+          // Upload and train (Tier 2)
+          await session.uploadScript(proposal.modifiedSource, `/workspace/${tier2Config.trainScript}`)
+          progress.agent(proposal.agent, 'Training (Tier 2)...')
+
+          const t2Command = buildGpuTrainCommand(tier2Config, 'LOCAL_RANK=0 RANK=0 WORLD_SIZE=1 MASTER_ADDR=localhost MASTER_PORT=29500 python3')
+          const t2Stdout = await session.executeTraining(t2Command, (tier2Config.maxWallclockSec + 300) * 1000)
+          const t2Metrics = parseMetrics(t2Stdout)
+          const t2Patch = computeSimpleDiff(sourceCode, proposal.modifiedSource)
+
+          const t2Run: ExperimentRun = {
+            id: ulid(), proposalId: proposal.id, tier: 2,
+            status: t2Metrics.valBpb !== undefined ? 'passed' : 'failed',
+            config: { iterations: 20000, trainBatchTokens: 524288, valBatchSize: 524288, maxWallclockSec: tier2Config.maxWallclockSec },
+            metrics: { trainLoss: t2Metrics.trainLoss, valLoss: t2Metrics.valLoss, valBpb: t2Metrics.valBpb, artifactBytes: t2Metrics.artifactBytes, wallclockSec: t2Metrics.wallclockSec, stepLosses: t2Metrics.stepLosses },
+            compliance: { artifactWithinLimit: t2Metrics.artifactBytes !== undefined ? t2Metrics.artifactBytes <= ctx.config.pgolf.maxArtifactBytes : false, noNetworkAccess: true, reproducible: false },
+            patch: t2Patch, stdout: t2Stdout, startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          }
+
+          const t2CurveSignal = analyzeLossCurve(t2Run.metrics.stepLosses ?? [])
+          const t2Baseline = baselineCurves.get(2) ?? baselineCurve
+          const t2Comparison = t2Baseline ? compareToBaseline(t2CurveSignal, t2Baseline.signal) : undefined
+          const t2Passed = t2Run.status === 'passed' && t2Run.metrics.valBpb !== undefined
+
+          // Log Tier 2 result
+          if (t2Run.metrics.valBpb !== undefined) {
+            progress.metric('val_bpb', t2Run.metrics.valBpb, updatedBoard.baseline.valBpb)
+          }
+          progress.agentResult(proposal.agent, `tier 2 gate: ${t2Passed ? 'PASSED' : 'FAILED'} — ${t2Passed ? `val_bpb=${t2Run.metrics.valBpb?.toFixed(4)}` : `status: ${t2Run.status}`}`, t2Passed)
+          if (t2Passed) cycleStats.tier2Passed++
+          cycleStats.tier2Attempted++
+
+          // Judge + precedent for Tier 2
+          try {
+            const currentBoard = board.load(boardId) ?? updatedBoard
+            const precedent = await judgeResult(llm, proposal, t2Run, currentBoard, config.agents.judgeMaxTokens)
+            precedents.append(precedent)
+            audit.write(cycleNum, 'precedent_created', precedent.id, `Precedent created: [${precedent.outcome}] ${precedent.summary}`, { outcome: precedent.outcome, family: precedent.family, delta: precedent.metrics.delta, tier: 2 }, proposal.agent)
+          } catch (err) {
+            progress.agentResult(proposal.agent, `result judging failed: ${String(err)}`, false)
+          }
+
+          // Tier 3 on same session if promoted
+          const tier3Config = config.policy.tiers.tier3
+          if (t2Passed && pipeline.hasTier(3) && tier3Config?.enabled && (ctx.costTracker ?? new CostTracker(50)).canAfford(tier3Config.estimatedCostPerRun)) {
+            progress.agent(proposal.agent, 'Promoted to Tier 3 — reusing GPU session...')
+
+            // Tier 3 needs 8 GPUs — terminate current 1-GPU pod, create 8-GPU in same volume
+            const tier3GpuTypes = [...new Set([tier3Config.gpuType, 'NVIDIA H100 80GB HBM3', 'NVIDIA H100 SXM'])]
+            const t3Vol = session.activeVolumeId ? [session.activeVolumeId, ...volumes.filter(v => v !== session.activeVolumeId)] : volumes
+
+            await session.terminate() // release 1-GPU pod
+
+            const t3Session = new PodSession(
+              new RunPodsClient(rpApiKey),
+              ctx.costTracker ?? new CostTracker(50),
+              (agent, line) => progress.agent(agent, line),
+            )
+            try {
+              const t3Acquired = await t3Session.acquire(tier3GpuTypes, t3Vol, {
+                gpuCount: tier3Config.gpuCount,
+                templateId: tier3Config.templateId,
+                containerImage: tier3Config.containerImage,
+              }, `cgolf-t3-${proposal.id.slice(-8)}`)
+
+              if (t3Acquired) {
+                await t3Session.waitReady()
+                await t3Session.ensureDeps()
+                await t3Session.ensureData(tier3Config.dataPath, tier3Config.tokenizerPath)
+                t3Session.recordCost(tier3Config.estimatedCostPerRun)
+
+                await t3Session.uploadScript(proposal.modifiedSource, `/workspace/${tier3Config.trainScript}`)
+                progress.agent(proposal.agent, 'Training (Tier 3, 8-GPU torchrun)...')
+
+                const t3Command = buildGpuTrainCommand(tier3Config, `torchrun --standalone --nproc_per_node=${tier3Config.gpuCount}`)
+                const t3Stdout = await t3Session.executeTraining(t3Command, (tier3Config.maxWallclockSec + 300) * 1000)
+                const t3Metrics = parseMetrics(t3Stdout)
+
+                const t3Run: ExperimentRun = {
+                  id: ulid(), proposalId: proposal.id, tier: 3,
+                  status: t3Metrics.valBpb !== undefined ? 'passed' : 'failed',
+                  config: { iterations: 20000, trainBatchTokens: 524288, valBatchSize: 524288, maxWallclockSec: tier3Config.maxWallclockSec },
+                  metrics: { trainLoss: t3Metrics.trainLoss, valLoss: t3Metrics.valLoss, valBpb: t3Metrics.valBpb, artifactBytes: t3Metrics.artifactBytes, wallclockSec: t3Metrics.wallclockSec, stepLosses: t3Metrics.stepLosses },
+                  compliance: { artifactWithinLimit: t3Metrics.artifactBytes !== undefined ? t3Metrics.artifactBytes <= ctx.config.pgolf.maxArtifactBytes : false, noNetworkAccess: true, reproducible: false },
+                  patch: t2Patch, stdout: t3Stdout, startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+                }
+
+                const t3Passed = t3Run.status === 'passed' && t3Run.metrics.valBpb !== undefined
+                if (t3Run.metrics.valBpb !== undefined) {
+                  progress.metric('val_bpb', t3Run.metrics.valBpb, updatedBoard.baseline.valBpb)
+                }
+                progress.agentResult(proposal.agent, `tier 3 gate: ${t3Passed ? 'PASSED' : 'FAILED'} — ${t3Passed ? `val_bpb=${t3Run.metrics.valBpb?.toFixed(4)}` : `status: ${t3Run.status}`}`, t3Passed)
+                if (t3Passed) cycleStats.tier3Passed++
+                cycleStats.tier3Attempted++
+
+                // Judge + merge for Tier 3
+                try {
+                  const currentBoard = board.load(boardId) ?? updatedBoard
+                  const precedent = await judgeResult(llm, proposal, t3Run, currentBoard, config.agents.judgeMaxTokens)
+                  precedents.append(precedent)
+                  audit.write(cycleNum, 'precedent_created', precedent.id, `Precedent created: [${precedent.outcome}] ${precedent.summary}`, { outcome: precedent.outcome, family: precedent.family, delta: precedent.metrics.delta, tier: 3 }, proposal.agent)
+
+                  if (t3Passed && shouldMerge(t3Run.metrics, currentBoard, config.policy.merge, config.pgolf.maxArtifactBytes)) {
+                    board.updateBest(boardId, {
+                      valBpb: t3Run.metrics.valBpb!, artifactBytes: t3Run.metrics.artifactBytes ?? currentBoard.currentBest.artifactBytes,
+                      commitRef: t3Run.id, proposalId: proposal.id,
+                    })
+                    progress.agentResult(proposal.agent, 'MERGED from Tier 3: new best result!', true)
+                    if (t3Run.metrics.valBpb !== undefined && (cycleStats.bestValBpb === undefined || t3Run.metrics.valBpb < cycleStats.bestValBpb)) {
+                      cycleStats.bestValBpb = t3Run.metrics.valBpb
+                      cycleStats.bestTechnique = proposal.title
+                      cycleStats.bestProposalId = proposal.id
+                    }
+                    try { await consensus.rewardAgent(proposal.agent, config.consensus.rewards.merge, 'tier 3 merge') } catch {}
+                  }
+                } catch (err) {
+                  progress.agentResult(proposal.agent, `Tier 3 judging failed: ${String(err)}`, false)
+                }
+              } else {
+                progress.agentResult(proposal.agent, 'No 8-GPU pod available for Tier 3', false)
+              }
+            } finally {
+              await t3Session.terminate()
+            }
+          } else if (!pipeline.hasTier(3) && t2Passed) {
+            // No Tier 3 — merge from Tier 2
+            try {
+              const currentBoard = board.load(boardId) ?? updatedBoard
+              if (shouldMerge(t2Run.metrics, currentBoard, config.policy.merge, config.pgolf.maxArtifactBytes)) {
+                board.updateBest(boardId, {
+                  valBpb: t2Run.metrics.valBpb!, artifactBytes: t2Run.metrics.artifactBytes ?? currentBoard.currentBest.artifactBytes,
+                  commitRef: t2Run.id, proposalId: proposal.id,
+                })
+                progress.agentResult(proposal.agent, 'MERGED from Tier 2: new best result!', true)
+                try { await consensus.rewardAgent(proposal.agent, config.consensus.rewards.merge, 'tier 2 merge') } catch {}
+              }
+            } catch {}
+          }
+        } catch (err) {
+          progress.agentResult(proposal.agent, `GPU execution error: ${String(err)}`, false)
+        } finally {
+          await session.terminate()
+        }
       }
+
+      // Dequeue everything we attempted
+      promoQueue.dequeue(allTier2Proposals.map(p => p.id))
 
       // Report cost
       if (ctx.costTracker) {
@@ -581,4 +738,27 @@ async function printBalanceReport(
   ctx.progress.phase(`Cycle ${cycleNumber}/${totalCycles} complete. Balances:`)
   ctx.progress.reputation(repData)
   ctx.progress.blank()
+}
+
+/** Build a training command for GPU tiers. Shared by Tier 2 (python3) and Tier 3 (torchrun). */
+function buildGpuTrainCommand(
+  tierConfig: { dataPath: string; tokenizerPath: string; trainScript: string; maxWallclockSec: number },
+  launcher: string,
+): string {
+  const safePath = /^[a-zA-Z0-9_.\-\/]+$/
+  for (const [name, value] of [['dataPath', tierConfig.dataPath], ['tokenizerPath', tierConfig.tokenizerPath], ['trainScript', tierConfig.trainScript]] as const) {
+    if (!safePath.test(value)) throw new Error(`Unsafe characters in config ${name}: ${value}`)
+  }
+  return [
+    'cd /workspace &&',
+    'PYTHONPATH=/workspace/site-packages',
+    `MAX_WALLCLOCK_SECONDS=${Math.floor(tierConfig.maxWallclockSec)}`,
+    `DATA_PATH='${tierConfig.dataPath}'`,
+    `TOKENIZER_PATH='${tierConfig.tokenizerPath}'`,
+    'TRAIN_LOG_EVERY=5',
+    'VAL_LOSS_EVERY=0',
+    // For single-GPU: launcher = "LOCAL_RANK=0 RANK=0 WORLD_SIZE=1 MASTER_ADDR=localhost MASTER_PORT=29500 python3"
+    // For multi-GPU: launcher = "torchrun --standalone --nproc_per_node=8"
+    `${launcher} '/workspace/${tierConfig.trainScript}' 2>&1`,
+  ].join(' ')
 }
