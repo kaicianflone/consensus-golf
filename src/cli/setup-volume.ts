@@ -8,10 +8,24 @@ const client = new RunPodsClient(process.env.RUNPOD_API_KEY!)
 async function main() {
   console.log(`Setting up volume ${volumeId} with dataset...`)
 
-  const podId = await client.createPod(
-    { gpuType: 'NVIDIA H100 80GB HBM3', gpuCount: 1, templateId: '', containerImage: 'runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04', volumeId },
-    'cgolf-data-setup'
-  )
+  // Try any available GPU — setup only needs a running pod, not specific GPU
+  const gpuTypes = ['NVIDIA GeForce RTX 4090', 'NVIDIA A100 80GB PCIe', 'NVIDIA H100 80GB HBM3', 'NVIDIA RTX A6000']
+  let podId: string | undefined
+  for (const gpu of gpuTypes) {
+    try {
+      console.log(`Trying ${gpu}...`)
+      podId = await client.createPod(
+        { gpuType: gpu, gpuCount: 1, templateId: '', containerImage: 'runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04', volumeId },
+        'cgolf-data-setup'
+      )
+      console.log(`Got ${gpu}`)
+      break
+    } catch (err) {
+      if (String(err).includes('SUPPLY_CONSTRAINT')) continue
+      throw err
+    }
+  }
+  if (!podId) throw new Error('No GPUs available in any type')
   console.log('Pod:', podId)
 
   try {

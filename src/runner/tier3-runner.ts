@@ -34,41 +34,44 @@ export class Tier3Runner implements TierRunner {
     try {
       const runId = ulid()
 
-      // GPU fallback list — use configured type first, then H100 variants
+      // Try each volume (datacenter) x GPU type combination
       const gpuFallbacks = [
         tier3Config.gpuType,
         'NVIDIA H100 80GB HBM3',
         'NVIDIA H100 SXM',
       ]
       const gpuTypes = [...new Set(gpuFallbacks)]
+      const volumes = tier3Config.volumeIds?.length
+        ? tier3Config.volumeIds
+        : [tier3Config.volumeId]
 
-      for (let i = 0; i < gpuTypes.length; i++) {
-        try {
-          ctx.onProgress?.(proposal.agent, `Trying GPU: ${gpuTypes[i]} (8x)...`)
-          podId = await this.client.createPod(
-            {
-              gpuType: gpuTypes[i],
-              gpuCount: tier3Config.gpuCount,
-              templateId: tier3Config.templateId,
-              containerImage: tier3Config.containerImage,
-              volumeId: tier3Config.volumeId,
-            },
-            `cgolf-t3-${runId.slice(-8)}`,
-          )
-          ctx.onProgress?.(proposal.agent, `Pod created on ${gpuTypes[i]}: ${podId}`)
-          break
-        } catch (err) {
-          const errStr = String(err)
-          const isRetryable = errStr.includes('SUPPLY_CONSTRAINT') || errStr.includes('HTTP 5')
-          if (isRetryable && i < gpuTypes.length - 1) {
-            ctx.onProgress?.(proposal.agent, `${gpuTypes[i]} unavailable, trying fallback...`)
-            continue
+      outer:
+      for (const vol of volumes) {
+        for (let i = 0; i < gpuTypes.length; i++) {
+          try {
+            ctx.onProgress?.(proposal.agent, `Trying ${gpuTypes[i]} x${tier3Config.gpuCount} (vol:${vol.slice(0, 6)})...`)
+            podId = await this.client.createPod(
+              {
+                gpuType: gpuTypes[i],
+                gpuCount: tier3Config.gpuCount,
+                templateId: tier3Config.templateId,
+                containerImage: tier3Config.containerImage,
+                volumeId: vol,
+              },
+              `cgolf-t3-${runId.slice(-8)}`,
+            )
+            ctx.onProgress?.(proposal.agent, `Pod created on ${gpuTypes[i]}: ${podId}`)
+            break outer
+          } catch (err) {
+            const errStr = String(err)
+            const isRetryable = errStr.includes('SUPPLY_CONSTRAINT') || errStr.includes('HTTP 5')
+            if (isRetryable) continue
+            throw err
           }
-          throw err
         }
       }
 
-      if (!podId) throw new Error('No GPU available across all fallback types')
+      if (!podId) throw new Error('No GPU available across all volumes and GPU types')
 
       ctx.onProgress?.(proposal.agent, `Waiting for RUNNING...`)
 
