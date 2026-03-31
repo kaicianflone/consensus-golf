@@ -4,7 +4,7 @@ import type { PolicyConfig, PgolfConfig } from '../schema/config.js'
 import type { LossCurveSignal, BaselineComparison } from './loss-curve-analyzer.js'
 import type { BaselineCurve } from '../persistence/baseline-manager.js'
 
-export type TierNumber = 0 | 1 | 2
+export type TierNumber = 0 | 1 | 2 | 3
 
 export interface TierGateResult {
   passed: boolean
@@ -31,6 +31,7 @@ export interface TierRunnerContext {
   policy: PolicyConfig
   pgolf: PgolfConfig
   baselineCurve: BaselineCurve | null
+  baselineCurves?: Map<number, BaselineCurve>
   onProgress?: (agent: string, line: string) => void
 }
 

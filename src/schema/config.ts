@@ -23,13 +23,30 @@ export const Tier2ConfigSchema = z.object({
   maxWallclockSec: z.number().default(900),
   estimatedCostPerRun: z.number().positive().default(1.0),
   enabled: z.boolean().default(false),
+  maxPromotions: z.number().default(1),
 })
 export type Tier2Config = z.infer<typeof Tier2ConfigSchema>
+
+export const Tier3ConfigSchema = z.object({
+  gpuType: z.string().default('NVIDIA H100 80GB HBM3'),
+  gpuCount: z.number().default(8),
+  templateId: z.string().default(''),
+  containerImage: z.string(),
+  volumeId: z.string(),
+  dataPath: z.string(),
+  tokenizerPath: z.string(),
+  trainScript: z.string(),
+  maxWallclockSec: z.number().default(600),
+  estimatedCostPerRun: z.number().default(3.50),
+  enabled: z.boolean().default(false),
+})
+export type Tier3Config = z.infer<typeof Tier3ConfigSchema>
 
 export const TiersConfigSchema = z.object({
   tier0: Tier0ConfigSchema.default({}),
   tier1: Tier1ConfigSchema.default({}),
   tier2: Tier2ConfigSchema.default({}),
+  tier3: Tier3ConfigSchema.optional(),
 }).default({})
 
 export const PolicyConfigSchema = z.object({

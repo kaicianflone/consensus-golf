@@ -3,7 +3,7 @@ import { z } from 'zod'
 export const ExperimentRunSchema = z.object({
   id: z.string(),
   proposalId: z.string(),
-  tier: z.union([z.literal(0), z.literal(1), z.literal(2)]),
+  tier: z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3)]),
   status: z.enum(['queued', 'running', 'passed', 'failed', 'invalid', 'cancelled']),
   config: z.object({
     iterations: z.number(),

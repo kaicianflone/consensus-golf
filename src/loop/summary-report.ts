@@ -8,6 +8,8 @@ export interface CycleResult {
   tier1Passed: number
   tier2Attempted: number
   tier2Passed: number
+  tier3Attempted: number
+  tier3Passed: number
   bestValBpb?: number
   bestTechnique?: string
   bestProposalId?: string
@@ -25,6 +27,8 @@ export interface OvernightSummary {
   tier1Passed: number
   tier2Attempted: number
   tier2Passed: number
+  tier3Attempted: number
+  tier3Passed: number
   bestResult?: {
     technique: string
     valBpb: number
@@ -52,6 +56,8 @@ export function generateSummary(
   const tier1Passed = cycles.reduce((s, c) => s + c.tier1Passed, 0)
   const tier2Attempted = cycles.reduce((s, c) => s + c.tier2Attempted, 0)
   const tier2Passed = cycles.reduce((s, c) => s + c.tier2Passed, 0)
+  const tier3Attempted = cycles.reduce((s, c) => s + c.tier3Attempted, 0)
+  const tier3Passed = cycles.reduce((s, c) => s + c.tier3Passed, 0)
 
   // Find best result across all cycles
   let bestResult: OvernightSummary['bestResult'] | undefined
@@ -83,6 +89,8 @@ export function generateSummary(
     tier1Passed,
     tier2Attempted,
     tier2Passed,
+    tier3Attempted,
+    tier3Passed,
     bestResult,
     gpuSpend: { spent: gpuSummary.spent, budget: gpuSummary.budget },
     wallclockMinutes,
@@ -108,6 +116,8 @@ export function formatSummaryMarkdown(summary: OvernightSummary): string {
     `- Tier 1 passed (smoke test): ${summary.tier1Passed}`,
     `- Tier 2 attempted (GPU): ${summary.tier2Attempted}`,
     `- Tier 2 passed: ${summary.tier2Passed}`,
+    `- Tier 3 attempted (multi-GPU): ${summary.tier3Attempted}`,
+    `- Tier 3 passed: ${summary.tier3Passed}`,
     '',
   ]
 
@@ -139,7 +149,7 @@ export function formatSummaryConsole(summary: OvernightSummary): string {
   const lines = [
     `=== OVERNIGHT SUMMARY ===`,
     `Board: ${summary.boardId} | Duration: ${dur} | Cycles: ${summary.cyclesCompleted} | Reason: ${summary.reason}`,
-    `Proposals: ${summary.totalProposals} | T0: ${summary.tier0Passed} | T1: ${summary.tier1Passed} | T2: ${summary.tier2Attempted}/${summary.tier2Passed}`,
+    `Proposals: ${summary.totalProposals} | T0: ${summary.tier0Passed} | T1: ${summary.tier1Passed} | T2: ${summary.tier2Attempted}/${summary.tier2Passed} | T3: ${summary.tier3Attempted}/${summary.tier3Passed}`,
     `GPU: $${summary.gpuSpend.spent.toFixed(2)}/$${summary.gpuSpend.budget.toFixed(2)}`,
   ]
 
