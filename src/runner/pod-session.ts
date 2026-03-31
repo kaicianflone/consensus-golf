@@ -92,6 +92,20 @@ export class PodSession {
       'pip install -q sentencepiece 2>&1 | tail -1',
       120_000,
     )
+    // Verify torch 2.5 is available on the volume
+    const torchCheck = await this.client.executeCommand(
+      this.podId,
+      'PYTHONPATH=/workspace/site-packages python3 -c "import torch; print(torch.__version__)" 2>&1 | tail -1',
+      15_000,
+    )
+    if (!torchCheck.includes('2.5')) {
+      this.onProgress?.('gpu', 'Torch 2.5 not found on volume, installing...')
+      await this.client.executeCommand(
+        this.podId,
+        'pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu124 --target=/workspace/site-packages 2>&1 | tail -3',
+        600_000,
+      )
+    }
     this.depsInstalled = true
     this.onProgress?.('gpu', 'Dependencies ready.')
   }
@@ -102,6 +116,11 @@ export class PodSession {
   async ensureData(dataPath: string, tokenizerPath: string): Promise<void> {
     if (!this.podId) throw new Error('No pod')
     if (this.dataVerified) return
+
+    // Validate paths to prevent shell injection
+    const safePath = /^[a-zA-Z0-9_.\-\/]+$/
+    if (!safePath.test(dataPath)) throw new Error(`Unsafe dataPath: ${dataPath}`)
+    if (!safePath.test(tokenizerPath)) throw new Error(`Unsafe tokenizerPath: ${tokenizerPath}`)
 
     const checkOutput = await this.client.executeCommand(
       this.podId,
@@ -131,21 +150,6 @@ export class PodSession {
           `\\"${tokenizerPath}\\"); ` +
         'print(\\"PROVISION_DONE\\")"',
     ].join(' && '), 600_000)
-
-    // Also install torch 2.5 to volume if missing
-    const torchCheck = await this.client.executeCommand(
-      this.podId,
-      'PYTHONPATH=/workspace/site-packages python3 -c "import torch; print(torch.__version__)" 2>&1 | tail -1',
-      15_000,
-    )
-    if (!torchCheck.includes('2.5')) {
-      this.onProgress?.('gpu', 'Installing torch 2.5 to volume...')
-      await this.client.executeCommand(
-        this.podId,
-        'pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu124 --target=/workspace/site-packages 2>&1 | tail -3',
-        600_000,
-      )
-    }
 
     this.dataVerified = true
     this.onProgress?.('gpu', 'Volume provisioned.')

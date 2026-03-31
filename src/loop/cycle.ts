@@ -392,10 +392,11 @@ export async function runCycle(
       }
 
       // Run each proposal through Tier 2, reusing pod session for Tier 3
+      const sharedCostTracker = ctx.costTracker ?? new CostTracker(50)
       for (const proposal of allTier2Proposals) {
         const session = new PodSession(
           new RunPodsClient(rpApiKey),
-          ctx.costTracker ?? new CostTracker(50),
+          sharedCostTracker,
           (agent, line) => progress.agent(agent, line),
         )
 
@@ -466,7 +467,7 @@ export async function runCycle(
 
           // Tier 3 on same session if promoted
           const tier3Config = config.policy.tiers.tier3
-          if (t2Passed && pipeline.hasTier(3) && tier3Config?.enabled && (ctx.costTracker ?? new CostTracker(50)).canAfford(tier3Config.estimatedCostPerRun)) {
+          if (t2Passed && pipeline.hasTier(3) && tier3Config?.enabled && sharedCostTracker.canAfford(tier3Config.estimatedCostPerRun)) {
             progress.agent(proposal.agent, 'Promoted to Tier 3 — reusing GPU session...')
 
             // Tier 3 needs 8 GPUs — terminate current 1-GPU pod, create 8-GPU in same volume
@@ -477,7 +478,7 @@ export async function runCycle(
 
             const t3Session = new PodSession(
               new RunPodsClient(rpApiKey),
-              ctx.costTracker ?? new CostTracker(50),
+              sharedCostTracker,
               (agent, line) => progress.agent(agent, line),
             )
             try {
