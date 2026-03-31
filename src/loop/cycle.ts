@@ -419,6 +419,13 @@ export async function runCycle(
             continue
           }
 
+          // Budget check before spending money
+          if (!sharedCostTracker.canAfford(tier2Config.estimatedCostPerRun)) {
+            progress.agentResult(proposal.agent, `Budget exhausted ($${sharedCostTracker.getRemaining().toFixed(2)} remaining)`, false)
+            await session.terminate()
+            continue
+          }
+
           await session.waitReady()
           await session.ensureDeps()
           await session.ensureData(tier2Config.dataPath, tier2Config.tokenizerPath)
@@ -428,6 +435,7 @@ export async function runCycle(
           await session.uploadScript(proposal.modifiedSource, `/workspace/${tier2Config.trainScript}`)
           progress.agent(proposal.agent, 'Training (Tier 2)...')
 
+          const t2StartedAt = new Date().toISOString()
           const t2Command = buildGpuTrainCommand(tier2Config, 'LOCAL_RANK=0 RANK=0 WORLD_SIZE=1 MASTER_ADDR=localhost MASTER_PORT=29500 python3')
           const t2Stdout = await session.executeTraining(t2Command, (tier2Config.maxWallclockSec + 300) * 1000)
           const t2Metrics = parseMetrics(t2Stdout)
@@ -439,7 +447,7 @@ export async function runCycle(
             config: { iterations: 20000, trainBatchTokens: 524288, valBatchSize: 524288, maxWallclockSec: tier2Config.maxWallclockSec },
             metrics: { trainLoss: t2Metrics.trainLoss, valLoss: t2Metrics.valLoss, valBpb: t2Metrics.valBpb, artifactBytes: t2Metrics.artifactBytes, wallclockSec: t2Metrics.wallclockSec, stepLosses: t2Metrics.stepLosses },
             compliance: { artifactWithinLimit: t2Metrics.artifactBytes !== undefined ? t2Metrics.artifactBytes <= ctx.config.pgolf.maxArtifactBytes : false, noNetworkAccess: true, reproducible: false },
-            patch: t2Patch, stdout: t2Stdout, startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+            patch: t2Patch, stdout: t2Stdout, startedAt: t2StartedAt, completedAt: new Date().toISOString(),
           }
 
           const t2CurveSignal = analyzeLossCurve(t2Run.metrics.stepLosses ?? [])
@@ -497,6 +505,7 @@ export async function runCycle(
                 await t3Session.uploadScript(proposal.modifiedSource, `/workspace/${tier3Config.trainScript}`)
                 progress.agent(proposal.agent, 'Training (Tier 3, 8-GPU torchrun)...')
 
+                const t3StartedAt = new Date().toISOString()
                 const t3Command = buildGpuTrainCommand(tier3Config, `torchrun --standalone --nproc_per_node=${tier3Config.gpuCount}`)
                 const t3Stdout = await t3Session.executeTraining(t3Command, (tier3Config.maxWallclockSec + 300) * 1000)
                 const t3Metrics = parseMetrics(t3Stdout)
@@ -507,7 +516,7 @@ export async function runCycle(
                   config: { iterations: 20000, trainBatchTokens: 524288, valBatchSize: 524288, maxWallclockSec: tier3Config.maxWallclockSec },
                   metrics: { trainLoss: t3Metrics.trainLoss, valLoss: t3Metrics.valLoss, valBpb: t3Metrics.valBpb, artifactBytes: t3Metrics.artifactBytes, wallclockSec: t3Metrics.wallclockSec, stepLosses: t3Metrics.stepLosses },
                   compliance: { artifactWithinLimit: t3Metrics.artifactBytes !== undefined ? t3Metrics.artifactBytes <= ctx.config.pgolf.maxArtifactBytes : false, noNetworkAccess: true, reproducible: false },
-                  patch: t2Patch, stdout: t3Stdout, startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+                  patch: t2Patch, stdout: t3Stdout, startedAt: t3StartedAt, completedAt: new Date().toISOString(),
                 }
 
                 const t3Passed = t3Run.status === 'passed' && t3Run.metrics.valBpb !== undefined
@@ -559,7 +568,9 @@ export async function runCycle(
                 progress.agentResult(proposal.agent, 'MERGED from Tier 2: new best result!', true)
                 try { await consensus.rewardAgent(proposal.agent, config.consensus.rewards.merge, 'tier 2 merge') } catch {}
               }
-            } catch {}
+            } catch (err) {
+              progress.agentResult(proposal.agent, `Tier 2 merge failed: ${String(err)}`, false)
+            }
           }
         } catch (err) {
           progress.agentResult(proposal.agent, `GPU execution error: ${String(err)}`, false)

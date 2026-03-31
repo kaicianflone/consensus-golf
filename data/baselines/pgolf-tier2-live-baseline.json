@@ -1,0 +1,107 @@
+{
+  "boardId": "pgolf-tier2-live",
+  "capturedAt": "2026-03-28T05:30:34.278Z",
+  "config": {
+    "iterations": 50,
+    "batchTokens": 8192
+  },
+  "stepLosses": [
+    {
+      "step": 1,
+      "totalSteps": 50,
+      "trainLoss": 6.9428
+    },
+    {
+      "step": 2,
+      "totalSteps": 50,
+      "trainLoss": 18.2344
+    },
+    {
+      "step": 3,
+      "totalSteps": 50,
+      "trainLoss": 15.1909
+    },
+    {
+      "step": 4,
+      "totalSteps": 50,
+      "trainLoss": 11.3287
+    },
+    {
+      "step": 5,
+      "totalSteps": 50,
+      "trainLoss": 8.49
+    },
+    {
+      "step": 6,
+      "totalSteps": 50,
+      "trainLoss": 7.0845
+    },
+    {
+      "step": 7,
+      "totalSteps": 50,
+      "trainLoss": 6.6878
+    },
+    {
+      "step": 8,
+      "totalSteps": 50,
+      "trainLoss": 6.6259
+    },
+    {
+      "step": 9,
+      "totalSteps": 50,
+      "trainLoss": 6.4536
+    },
+    {
+      "step": 10,
+      "totalSteps": 50,
+      "trainLoss": 6.3332
+    },
+    {
+      "step": 15,
+      "totalSteps": 50,
+      "trainLoss": 5.8162
+    },
+    {
+      "step": 20,
+      "totalSteps": 50,
+      "trainLoss": 5.1811
+    },
+    {
+      "step": 25,
+      "totalSteps": 50,
+      "trainLoss": 5.0077
+    },
+    {
+      "step": 30,
+      "totalSteps": 50,
+      "trainLoss": 4.8652
+    },
+    {
+      "step": 35,
+      "totalSteps": 50,
+      "trainLoss": 4.7186
+    },
+    {
+      "step": 40,
+      "totalSteps": 50,
+      "trainLoss": 4.8378
+    },
+    {
+      "step": 45,
+      "totalSteps": 50,
+      "trainLoss": 4.6253
+    },
+    {
+      "step": 50,
+      "totalSteps": 50,
+      "trainLoss": 4.6226
+    }
+  ],
+  "signal": {
+    "descentRate": -0.14359587192681528,
+    "r2": 0.3651671681918587,
+    "lossDrop": 2.3202,
+    "lossDropFraction": 0.33418793570317445,
+    "stepCount": 18
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "boardId": "pgolf-tier3-live",
+  "capturedAt": "2026-03-31T05:40:17.165Z",
+  "config": {
+    "iterations": 50,
+    "batchTokens": 8192
+  },
+  "stepLosses": [],
+  "signal": {
+    "descentRate": 0,
+    "r2": 0,
+    "lossDrop": 0,
+    "lossDropFraction": 0,
+    "stepCount": 0
+  }
+}

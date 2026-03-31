@@ -141,8 +141,6 @@ export class PodSession {
       `mkdir -p ${dataPath} $(dirname ${tokenizerPath})`,
       'python3 -c "' +
         'from huggingface_hub import hf_hub_download; import shutil, os; ' +
-        `os.makedirs(\\"${dataPath}\\", exist_ok=True); ` +
-        `os.makedirs(\\"$(dirname ${tokenizerPath})\\", exist_ok=True); ` +
         `[shutil.copy(hf_hub_download(\\"willdepueoai/parameter-golf\\", f, subfolder=\\"datasets/datasets/fineweb10B_sp1024\\", repo_type=\\"dataset\\"), ` +
           `\\"${dataPath}/\\" + f) ` +
           `for f in [\\"fineweb_train_000000.bin\\", \\"fineweb_val_000000.bin\\"]]; ` +
@@ -150,6 +148,16 @@ export class PodSession {
           `\\"${tokenizerPath}\\"); ` +
         'print(\\"PROVISION_DONE\\")"',
     ].join(' && '), 600_000)
+
+    // Verify provisioning actually worked
+    const verifyOutput = await this.client.executeCommand(
+      this.podId,
+      `[ -f ${dataPath}/fineweb_train_000000.bin ] && [ -f ${tokenizerPath} ] && echo VERIFY_OK || echo VERIFY_FAIL`,
+      15_000,
+    )
+    if (!verifyOutput.includes('VERIFY_OK')) {
+      throw new Error(`Volume provisioning failed — data files missing after download`)
+    }
 
     this.dataVerified = true
     this.onProgress?.('gpu', 'Volume provisioned.')
