@@ -59,31 +59,37 @@ let podId: string | null = null
 
 async function main() {
   try {
-    // Create pod
-    for (let i = 0; i < gpuTypes.length; i++) {
-      try {
-        console.log(`Trying GPU: ${gpuTypes[i]}...`)
-        podId = await client.createPod(
-          {
-            gpuType: gpuTypes[i],
-            gpuCount: tier2.gpuCount,
-            templateId: tier2.templateId,
-            containerImage: tier2.containerImage,
-            volumeId: noVolume ? '' : (volumeOverride || tier2.volumeId),
-            containerDiskInGb: noVolume ? 50 : undefined,
-          },
-          `cgolf-single-test`,
-        )
-        console.log(`Pod created on ${gpuTypes[i]}: ${podId}`)
-        break
-      } catch (err) {
-        if (i < gpuTypes.length - 1) {
-          console.log(`${gpuTypes[i]} unavailable: ${String(err).slice(0, 100)}`)
-          continue
+    // Create pod — try all volumes x GPU types
+    const volumes = noVolume ? [''] : (volumeOverride ? [volumeOverride] : (tier2.volumeIds?.length ? tier2.volumeIds : [tier2.volumeId]))
+    console.log(`Trying ${volumes.length} volume(s) x ${gpuTypes.length} GPU type(s)...`)
+
+    outer:
+    for (const vol of volumes) {
+      for (const gpu of gpuTypes) {
+        try {
+          console.log(`  ${gpu} (vol:${vol ? vol.slice(0, 6) : 'none'})...`)
+          podId = await client.createPod(
+            {
+              gpuType: gpu,
+              gpuCount: tier2.gpuCount,
+              templateId: tier2.templateId,
+              containerImage: tier2.containerImage,
+              volumeId: vol,
+              containerDiskInGb: noVolume ? 50 : undefined,
+            },
+            `cgolf-single-test`,
+          )
+          console.log(`Pod created on ${gpu}: ${podId}`)
+          break outer
+        } catch (err) {
+          const errStr = String(err)
+          if (errStr.includes('SUPPLY_CONSTRAINT')) continue
+          throw err
         }
-        throw err
       }
     }
+
+    if (!podId) throw new Error('No GPU available across all volumes and GPU types')
 
     if (!podId) throw new Error('No GPU available')
 
