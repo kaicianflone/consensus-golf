@@ -393,6 +393,7 @@ export async function runCycle(
 
       // Run each proposal through Tier 2, reusing pod session for Tier 3
       const sharedCostTracker = ctx.costTracker ?? new CostTracker(50)
+      const executedProposalIds: string[] = []  // track which were actually attempted (not re-queued)
       for (const proposal of allTier2Proposals) {
         const session = new PodSession(
           new RunPodsClient(rpApiKey),
@@ -425,6 +426,8 @@ export async function runCycle(
             await session.terminate()
             continue
           }
+
+          executedProposalIds.push(proposal.id)  // mark as attempted (will be dequeued)
 
           await session.waitReady()
           await session.ensureDeps()
@@ -579,8 +582,8 @@ export async function runCycle(
         }
       }
 
-      // Dequeue everything we attempted
-      promoQueue.dequeue(allTier2Proposals.map(p => p.id))
+      // Dequeue only proposals that were actually attempted (not re-queued on !acquired)
+      promoQueue.dequeue(executedProposalIds)
 
       // Report cost
       if (ctx.costTracker) {
