@@ -67,6 +67,26 @@ export class RunPodsClient {
     return json.data
   }
 
+  /**
+   * Check GPU availability without creating a pod.
+   * Queries the gpuTypes endpoint for community/secure stock.
+   * Returns list of available GPU type IDs.
+   */
+  async getAvailableGpuTypes(gpuTypeIds: string[]): Promise<string[]> {
+    const query = `{ gpuTypes { id communityPrice securePrice } }`
+    try {
+      const data = await this.graphql<{ gpuTypes: Array<{ id: string; communityPrice: number | null; securePrice: number | null }> }>(query)
+      const available = new Set(
+        data.gpuTypes
+          .filter(g => g.communityPrice !== null || g.securePrice !== null)
+          .map(g => g.id)
+      )
+      return gpuTypeIds.filter(id => available.has(id))
+    } catch {
+      return [] // assume unavailable on error
+    }
+  }
+
   async createPod(config: RunPodsConfig, name: string, options?: { dockerArgs?: string; env?: Array<{ key: string; value: string }> }): Promise<string> {
     const input: Record<string, unknown> = {
       cloudType: 'ALL',

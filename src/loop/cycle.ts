@@ -24,6 +24,8 @@ import type { BaselineCurve } from '../persistence/baseline-manager.js'
 import { getExplorerForCycle } from '../agents/exploration.js'
 import type { AgentContextOptions } from '../agents/context.js'
 import { FeedbackAggregator } from '../memory/feedback-aggregator.js'
+import { PromotionQueue } from './promotion-queue.js'
+import type { QueueEntry } from './promotion-queue.js'
 import type { CycleResult } from './summary-report.js'
 
 export async function runCycle(
@@ -355,35 +357,80 @@ export async function runCycle(
     llm, audit, precedents, board, consensus, progress, config, cycleStats, updatedBoard, boardId, cycleNum,
   })
 
+  // ─── GPU TIERS: availability-aware with promotion queue ──────────
   if (promoted.length > 0 && pipeline.hasTier(2)) {
-    progress.blank()
-    progress.phase(`Executing ${promoted.length} promoted proposal(s) on RunPods (Tier 2)...`)
-    const tier2Results = await pipeline.runTier(2, promoted.map(r => r.proposal), tierCtx, cycleNum)
-    cycleStats.tier2Attempted = tier2Results.length
+    const promoQueue = new PromotionQueue(path.join(workDir, '..'), boardId)
+    const rpApiKey = process.env.RUNPOD_API_KEY
+    const tier2Config = config.policy.tiers.tier2!
+    const gpuTypes = [...new Set([tier2Config.gpuType, 'NVIDIA A100 80GB PCIe', 'NVIDIA A100-SXM4-80GB', 'NVIDIA GeForce RTX 4090'])]
 
-    await handleTierResults(tier2Results, 'Tier 2', {
-      llm, audit, precedents, board, consensus, progress, config, cycleStats, updatedBoard, boardId, cycleNum,
-      skipMerge: pipeline.hasTier(3),  // defer merge to Tier 3 if enabled
-    })
-
-    // Tier 2 -> 3 promotion (use getPromotedByBpb for val_bpb sorting)
-    const tier2MaxPromotions = config.policy.tiers.tier2?.maxPromotions ?? 1
-    const promotedToTier3 = pipeline.getPromotedByBpb(tier2Results, tier2MaxPromotions)
-    if (promotedToTier3.length > 0 && pipeline.hasTier(3)) {
-      progress.blank()
-      progress.phase(`Executing ${promotedToTier3.length} promoted proposal(s) on multi-GPU (Tier 3)...`)
-      const tier3Results = await pipeline.runTier(3, promotedToTier3.map(r => r.proposal), tierCtx, cycleNum)
-      cycleStats.tier3Attempted = tier3Results.length
-
-      await handleTierResults(tier3Results, 'Tier 3', {
-        llm, audit, precedents, board, consensus, progress, config, cycleStats, updatedBoard, boardId, cycleNum,
-      })
+    // Check GPU availability before attempting (one lightweight API call)
+    let gpusAvailable = false
+    if (rpApiKey) {
+      const rpClient = new RunPodsClient(rpApiKey)
+      const available = await rpClient.getAvailableGpuTypes(gpuTypes)
+      gpusAvailable = available.length > 0
+      if (gpusAvailable) {
+        progress.phase(`GPUs available: ${available.join(', ')}`)
+      }
     }
 
-    // Report cost
-    if (ctx.costTracker) {
-      const summary = ctx.costTracker.getSummary()
-      progress.phase(`GPU spend: $${summary.spent.toFixed(2)} / $${summary.budget.toFixed(2)} budget`)
+    if (gpusAvailable) {
+      // Drain queued proposals first, then run current promotions
+      const queued = promoQueue.getForTier(2)
+      const allTier2Proposals = [
+        ...queued.map(e => e.proposal),
+        ...promoted.map(r => r.proposal),
+      ]
+      if (queued.length > 0) {
+        progress.phase(`Draining ${queued.length} queued proposal(s) + ${promoted.length} new promotion(s)`)
+      }
+
+      progress.blank()
+      progress.phase(`Executing ${allTier2Proposals.length} proposal(s) on RunPods (Tier 2)...`)
+      const tier2Results = await pipeline.runTier(2, allTier2Proposals, tierCtx, cycleNum)
+      cycleStats.tier2Attempted = tier2Results.length
+
+      // Dequeue everything we attempted (pass or fail, doesn't matter)
+      promoQueue.dequeue(allTier2Proposals.map(p => p.id))
+
+      await handleTierResults(tier2Results, 'Tier 2', {
+        llm, audit, precedents, board, consensus, progress, config, cycleStats, updatedBoard, boardId, cycleNum,
+        skipMerge: pipeline.hasTier(3),
+      })
+
+      // Tier 2 -> 3 promotion
+      const tier2MaxPromotions = config.policy.tiers.tier2?.maxPromotions ?? 1
+      const promotedToTier3 = pipeline.getPromotedByBpb(tier2Results, tier2MaxPromotions)
+      if (promotedToTier3.length > 0 && pipeline.hasTier(3)) {
+        progress.blank()
+        progress.phase(`Executing ${promotedToTier3.length} promoted proposal(s) on multi-GPU (Tier 3)...`)
+        const tier3Results = await pipeline.runTier(3, promotedToTier3.map(r => r.proposal), tierCtx, cycleNum)
+        cycleStats.tier3Attempted = tier3Results.length
+
+        await handleTierResults(tier3Results, 'Tier 3', {
+          llm, audit, precedents, board, consensus, progress, config, cycleStats, updatedBoard, boardId, cycleNum,
+        })
+      }
+
+      // Report cost
+      if (ctx.costTracker) {
+        const summary = ctx.costTracker.getSummary()
+        progress.phase(`GPU spend: $${summary.spent.toFixed(2)} / $${summary.budget.toFixed(2)} budget`)
+      }
+    } else {
+      // No GPUs available — queue Tier 1 winners for later
+      const newEntries: QueueEntry[] = promoted.map(r => ({
+        proposal: r.proposal,
+        sourceTier: 1,
+        targetTier: 2,
+        queuedAt: new Date().toISOString(),
+        cycleNum,
+        relativeDescentRate: r.baselineComparison?.relativeDescentRate,
+      }))
+      promoQueue.enqueue(newEntries)
+      const sizes = promoQueue.size()
+      progress.phase(`No GPUs available — queued ${promoted.length} proposal(s) (queue: ${sizes[2] ?? 0} for Tier 2)`)
     }
   } else if (promoted.length > 0) {
     progress.phase(`Tier 1 promoted ${promoted.length} proposal(s) (Tier 2 not enabled)`)
