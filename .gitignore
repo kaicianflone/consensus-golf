@@ -10,3 +10,7 @@ data/consensus/
 .DS_Store
 docs/
 .env.local
+.claude/worktrees/
+data/baselines/
+data/reports/
+logs/
