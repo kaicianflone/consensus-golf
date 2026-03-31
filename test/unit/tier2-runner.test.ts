@@ -117,14 +117,14 @@ describe('Tier2Runner', () => {
     delete process.env.RUNPOD_API_KEY
   })
 
-  it('records cost even on failure', async () => {
+  it('charges cost when pod created even if run fails', async () => {
     const client = createMockClient()
     client.executeCommand.mockRejectedValue(new Error('failed'))
     const costTracker = new CostTracker(100)
     const runner = new Tier2Runner(client, costTracker)
     process.env.RUNPOD_API_KEY = 'test-key'
     await runner.run(createProposal(), createCtx())
-    expect(costTracker.getSpent()).toBe(1.0) // estimatedCostPerRun
+    expect(costTracker.getSpent()).toBe(1.0) // RunPod bills regardless of outcome
     delete process.env.RUNPOD_API_KEY
   })
 

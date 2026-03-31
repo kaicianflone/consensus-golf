@@ -63,7 +63,7 @@ describe('RunPodsClient', () => {
 
   it('getPodStatus returns parsed PodInfo', async () => {
     const podInfo = {
-      id: 'pod-456',
+      id: 'pod456abc',
       desiredStatus: 'RUNNING',
       costPerHr: 2.49,
       runtime: {
@@ -79,9 +79,9 @@ describe('RunPodsClient', () => {
       json: () => Promise.resolve({ data: { pod: podInfo } }),
     } as any)
 
-    const result = await client.getPodStatus('pod-456')
+    const result = await client.getPodStatus('pod456abc')
 
-    expect(result.id).toBe('pod-456')
+    expect(result.id).toBe('pod456abc')
     expect(result.desiredStatus).toBe('RUNNING')
     expect(result.costPerHr).toBe(2.49)
     expect(result.runtime?.ports).toHaveLength(1)
@@ -167,9 +167,10 @@ describe('RunPodsClient', () => {
       ok: false,
       status: 500,
       statusText: 'Internal Server Error',
+      text: () => Promise.resolve('server error'),
     } as any)
 
-    const err = await client.getPodStatus('pod-fail').catch((e) => e)
+    const err = await client.getPodStatus('podfail').catch((e) => e)
     expect(err).toBeInstanceOf(RunPodsApiError)
     expect(err.message).toContain('RunPods API HTTP')
   })
@@ -182,7 +183,7 @@ describe('RunPodsClient', () => {
       }),
     } as any)
 
-    const err = await client.getPodStatus('pod-bad').catch((e) => e)
+    const err = await client.getPodStatus('podbad').catch((e) => e)
     expect(err).toBeInstanceOf(RunPodsApiError)
     expect(err.message).toContain('RunPods API error')
   })

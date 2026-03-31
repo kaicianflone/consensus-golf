@@ -60,8 +60,9 @@ export class Tier2Runner implements TierRunner {
           ctx.onProgress?.(proposal.agent, `Pod created on ${gpuTypes[i]}: ${podId}`)
           break
         } catch (err) {
-          const isSupplyConstraint = String(err).includes('SUPPLY_CONSTRAINT')
-          if (isSupplyConstraint && i < gpuTypes.length - 1) {
+          const errStr = String(err)
+          const isRetryable = errStr.includes('SUPPLY_CONSTRAINT') || errStr.includes('HTTP 5')
+          if (isRetryable && i < gpuTypes.length - 1) {
             ctx.onProgress?.(proposal.agent, `${gpuTypes[i]} unavailable, trying fallback...`)
             continue
           }
@@ -88,7 +89,7 @@ export class Tier2Runner implements TierRunner {
       ctx.onProgress?.(proposal.agent, 'Script uploaded, starting training...')
 
       const command = this.buildTrainCommand(ctx)
-      const stdout = await this.client.executeCommand(podId, command, tier2Config.maxWallclockSec * 1000)
+      const stdout = await this.client.executeCommand(podId, command, (tier2Config.maxWallclockSec + 300) * 1000)
 
       const metrics = parseMetrics(stdout)
       const patch = computeSimpleDiff(ctx.sourceCode, proposal.modifiedSource)
@@ -156,7 +157,7 @@ export class Tier2Runner implements TierRunner {
         } catch {
           ctx.onProgress?.(proposal.agent, `WARNING: Failed to terminate pod ${podId}`)
         }
-        // Only charge cost if a pod was actually created
+        // Always charge cost when a pod was created — RunPod bills regardless of outcome
         this.costTracker.recordSpend(tier2Config.estimatedCostPerRun)
       }
     }
@@ -221,6 +222,7 @@ export class Tier2Runner implements TierRunner {
     }
     const parts = [
       'cd /workspace &&',
+      'PYTHONPATH=/workspace/site-packages',
       'LOCAL_RANK=0 RANK=0 WORLD_SIZE=1 MASTER_ADDR=localhost MASTER_PORT=29500',
       `MAX_WALLCLOCK_SECONDS=${Math.floor(tier2.maxWallclockSec)}`,
       `DATA_PATH='${tier2.dataPath}'`,
