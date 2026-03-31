@@ -20,6 +20,7 @@
       "templateId": "",
       "containerImage": "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04",
       "volumeId": "fmbckw29gp",
+      "volumeIds": ["fmbckw29gp", "j6tx3o2hv6", "qk2ubo9l2x", "6in97xytll", "mj4ve5tkh5"],
       "dataPath": "/workspace/datasets/datasets/fineweb10B_sp1024",
       "tokenizerPath": "/workspace/datasets/tokenizers/fineweb_1024_bpe.model",
       "trainScript": "train_gpt.py",
@@ -34,12 +35,13 @@
       "templateId": "",
       "containerImage": "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04",
       "volumeId": "fmbckw29gp",
+      "volumeIds": ["fmbckw29gp", "j6tx3o2hv6", "qk2ubo9l2x", "6in97xytll"],
       "dataPath": "/workspace/datasets/datasets/fineweb10B_sp1024",
       "tokenizerPath": "/workspace/datasets/tokenizers/fineweb_1024_bpe.model",
       "trainScript": "train_gpt.py",
       "maxWallclockSec": 600,
       "estimatedCostPerRun": 3.50,
-      "enabled": false
+      "enabled": true
     }
   }
 }

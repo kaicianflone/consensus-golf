@@ -34,43 +34,45 @@ export class Tier2Runner implements TierRunner {
     try {
       const runId = ulid()
 
-      // Try GPU types in priority order — H100 is often sold out
+      // Try each volume (datacenter) x GPU type combination
       const gpuFallbacks = [
         tier2Config.gpuType,
         'NVIDIA A100 80GB PCIe',
         'NVIDIA A100-SXM4-80GB',
         'NVIDIA GeForce RTX 4090',
       ]
-      // Deduplicate while preserving order
       const gpuTypes = [...new Set(gpuFallbacks)]
+      const volumes = tier2Config.volumeIds?.length
+        ? tier2Config.volumeIds
+        : [tier2Config.volumeId]
 
-      for (let i = 0; i < gpuTypes.length; i++) {
-        try {
-          ctx.onProgress?.(proposal.agent, `Trying GPU: ${gpuTypes[i]}...`)
-          podId = await this.client.createPod(
-            {
-              gpuType: gpuTypes[i],
-              gpuCount: tier2Config.gpuCount,
-              templateId: tier2Config.templateId,
-              containerImage: tier2Config.containerImage,
-              volumeId: tier2Config.volumeId,
-            },
-            `cgolf-${runId.slice(-8)}`,
-          )
-          ctx.onProgress?.(proposal.agent, `Pod created on ${gpuTypes[i]}: ${podId}`)
-          break
-        } catch (err) {
-          const errStr = String(err)
-          const isRetryable = errStr.includes('SUPPLY_CONSTRAINT') || errStr.includes('HTTP 5')
-          if (isRetryable && i < gpuTypes.length - 1) {
-            ctx.onProgress?.(proposal.agent, `${gpuTypes[i]} unavailable, trying fallback...`)
-            continue
+      outer:
+      for (const vol of volumes) {
+        for (let i = 0; i < gpuTypes.length; i++) {
+          try {
+            ctx.onProgress?.(proposal.agent, `Trying ${gpuTypes[i]} (vol:${vol.slice(0, 6)})...`)
+            podId = await this.client.createPod(
+              {
+                gpuType: gpuTypes[i],
+                gpuCount: tier2Config.gpuCount,
+                templateId: tier2Config.templateId,
+                containerImage: tier2Config.containerImage,
+                volumeId: vol,
+              },
+              `cgolf-${runId.slice(-8)}`,
+            )
+            ctx.onProgress?.(proposal.agent, `Pod created on ${gpuTypes[i]}: ${podId}`)
+            break outer
+          } catch (err) {
+            const errStr = String(err)
+            const isRetryable = errStr.includes('SUPPLY_CONSTRAINT') || errStr.includes('HTTP 5')
+            if (isRetryable) continue
+            throw err
           }
-          throw err
         }
       }
 
-      if (!podId) throw new Error('No GPU available across all fallback types')
+      if (!podId) throw new Error('No GPU available across all volumes and GPU types')
 
       ctx.onProgress?.(proposal.agent, `Waiting for RUNNING...`)
 
