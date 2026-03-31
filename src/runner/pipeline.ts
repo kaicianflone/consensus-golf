@@ -68,6 +68,13 @@ export class PipelineOrchestrator {
       .slice(0, maxPromotions)
   }
 
+  getPromotedByBpb(tierResults: TierRunResult[], maxPromotions: number): TierRunResult[] {
+    return tierResults
+      .filter(r => r.promotable && r.run?.metrics.valBpb !== undefined)
+      .sort((a, b) => (a.run!.metrics.valBpb! - b.run!.metrics.valBpb!))  // lower is better
+      .slice(0, maxPromotions)
+  }
+
   private auditGate(cycleNum: number, result: TierRunResult): void {
     if (!this.audit) return
     const eventType = result.promotable ? 'tier_gate_passed' : 'tier_gate_failed'
