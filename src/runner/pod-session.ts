@@ -133,21 +133,21 @@ export class PodSession {
       return
     }
 
-    // Provision data inline — this volume hasn't been set up yet
-    this.onProgress?.('gpu', `Volume ${this.volumeId?.slice(0, 6)} missing data, provisioning inline...`)
+    // Provision data inline using the official parameter-golf download script
+    this.onProgress?.('gpu', `Volume ${this.volumeId?.slice(0, 6)} missing data, provisioning (80 shards)...`)
 
     await this.client.executeCommand(this.podId, [
+      'cd /workspace',
+      'git clone --depth 1 https://github.com/openai/parameter-golf.git _pgolf_setup 2>&1 | tail -3',
+      'cd _pgolf_setup',
       'pip install -q huggingface_hub',
+      'python3 data/cached_challenge_fineweb.py --variant sp1024 --train-shards 80 2>&1 | tail -5',
+      // Move data to the expected paths
       `mkdir -p ${dataPath} $(dirname ${tokenizerPath})`,
-      'python3 -c "' +
-        'from huggingface_hub import hf_hub_download; import shutil, os; ' +
-        `[shutil.copy(hf_hub_download(\\"willdepueoai/parameter-golf\\", f, subfolder=\\"datasets/datasets/fineweb10B_sp1024\\", repo_type=\\"dataset\\"), ` +
-          `\\"${dataPath}/\\" + f) ` +
-          `for f in [\\"fineweb_train_000000.bin\\", \\"fineweb_val_000000.bin\\"]]; ` +
-        `shutil.copy(hf_hub_download(\\"willdepueoai/parameter-golf\\", \\"fineweb_1024_bpe.model\\", subfolder=\\"datasets/tokenizers\\", repo_type=\\"dataset\\"), ` +
-          `\\"${tokenizerPath}\\"); ` +
-        'print(\\"PROVISION_DONE\\")"',
-    ].join(' && '), 600_000)
+      `cp data/datasets/fineweb10B_sp1024/* ${dataPath}/`,
+      `cp data/tokenizers/fineweb_1024_bpe.model ${tokenizerPath}`,
+      'cd /workspace && rm -rf _pgolf_setup',
+    ].join(' && '), 1800_000) // 30 min for 80 shards (~16GB)
 
     // Verify provisioning actually worked
     const verifyOutput = await this.client.executeCommand(
