@@ -8,8 +8,8 @@ import { analyzeLossCurve, compareToBaseline } from './loss-curve-analyzer.js'
 import { computeSimpleDiff } from './sandbox.js'
 import { ulid } from 'ulid'
 
-export class Tier2Runner implements TierRunner {
-  readonly tier = 2 as const
+export class Tier3Runner implements TierRunner {
+  readonly tier = 3 as const
 
   constructor(
     private readonly client: RunPodsClient,
@@ -21,41 +21,39 @@ export class Tier2Runner implements TierRunner {
     const preGate = this.checkPreGate(ctx)
     if (!preGate.passed) {
       return {
-        tier: 2, proposal, preGate,
+        tier: 3, proposal, preGate,
         postGate: preGate, promotable: false,
       }
     }
 
     // Execute
     let run: ExperimentRun | undefined
-    const tier2Config = ctx.policy.tiers.tier2!
+    const tier3Config = ctx.policy.tiers.tier3!
     let podId: string | null = null
 
     try {
       const runId = ulid()
 
-      // Try GPU types in priority order — H100 is often sold out
+      // GPU fallback list — use configured type first, then H100 variants
       const gpuFallbacks = [
-        tier2Config.gpuType,
-        'NVIDIA A100 80GB PCIe',
-        'NVIDIA A100-SXM4-80GB',
-        'NVIDIA GeForce RTX 4090',
+        tier3Config.gpuType,
+        'NVIDIA H100 80GB HBM3',
+        'NVIDIA H100 SXM',
       ]
-      // Deduplicate while preserving order
       const gpuTypes = [...new Set(gpuFallbacks)]
 
       for (let i = 0; i < gpuTypes.length; i++) {
         try {
-          ctx.onProgress?.(proposal.agent, `Trying GPU: ${gpuTypes[i]}...`)
+          ctx.onProgress?.(proposal.agent, `Trying GPU: ${gpuTypes[i]} (8x)...`)
           podId = await this.client.createPod(
             {
               gpuType: gpuTypes[i],
-              gpuCount: tier2Config.gpuCount,
-              templateId: tier2Config.templateId,
-              containerImage: tier2Config.containerImage,
-              volumeId: tier2Config.volumeId,
+              gpuCount: tier3Config.gpuCount,
+              templateId: tier3Config.templateId,
+              containerImage: tier3Config.containerImage,
+              volumeId: tier3Config.volumeId,
             },
-            `cgolf-${runId.slice(-8)}`,
+            `cgolf-t3-${runId.slice(-8)}`,
           )
           ctx.onProgress?.(proposal.agent, `Pod created on ${gpuTypes[i]}: ${podId}`)
           break
@@ -85,11 +83,11 @@ export class Tier2Runner implements TierRunner {
       )
       ctx.onProgress?.(proposal.agent, 'Dependencies ready, uploading script...')
 
-      await this.client.uploadScript(podId, proposal.modifiedSource, `/workspace/${tier2Config.trainScript}`)
-      ctx.onProgress?.(proposal.agent, 'Script uploaded, starting training...')
+      await this.client.uploadScript(podId, proposal.modifiedSource, `/workspace/${tier3Config.trainScript}`)
+      ctx.onProgress?.(proposal.agent, 'Script uploaded, starting training (8-GPU torchrun)...')
 
       const command = this.buildTrainCommand(ctx)
-      const stdout = await this.client.executeCommand(podId, command, (tier2Config.maxWallclockSec + 300) * 1000)
+      const stdout = await this.client.executeCommand(podId, command, (tier3Config.maxWallclockSec + 300) * 1000)
 
       const metrics = parseMetrics(stdout)
       const patch = computeSimpleDiff(ctx.sourceCode, proposal.modifiedSource)
@@ -97,13 +95,13 @@ export class Tier2Runner implements TierRunner {
       run = {
         id: runId,
         proposalId: proposal.id,
-        tier: 2,
+        tier: 3,
         status: metrics.valBpb !== undefined ? 'passed' : 'failed',
         config: {
           iterations: 20000,
           trainBatchTokens: 524288,
           valBatchSize: 524288,
-          maxWallclockSec: tier2Config.maxWallclockSec,
+          maxWallclockSec: tier3Config.maxWallclockSec,
         },
         metrics: {
           trainLoss: metrics.trainLoss,
@@ -126,19 +124,19 @@ export class Tier2Runner implements TierRunner {
         completedAt: new Date().toISOString(),
       }
     } catch (err) {
-      ctx.onProgress?.(proposal.agent, `Tier 2 execution error: ${String(err)}`)
+      ctx.onProgress?.(proposal.agent, `Tier 3 execution error: ${String(err)}`)
 
       if (!run) {
         run = {
           id: ulid(),
           proposalId: proposal.id,
-          tier: 2,
+          tier: 3,
           status: 'failed',
           config: {
             iterations: 20000,
             trainBatchTokens: 524288,
             valBatchSize: 524288,
-            maxWallclockSec: tier2Config.maxWallclockSec,
+            maxWallclockSec: tier3Config.maxWallclockSec,
           },
           metrics: {},
           compliance: { artifactWithinLimit: false, noNetworkAccess: true, reproducible: false },
@@ -158,37 +156,38 @@ export class Tier2Runner implements TierRunner {
           ctx.onProgress?.(proposal.agent, `WARNING: Failed to terminate pod ${podId}`)
         }
         // Always charge cost when a pod was created — RunPod bills regardless of outcome
-        this.costTracker.recordSpend(tier2Config.estimatedCostPerRun)
+        this.costTracker.recordSpend(tier3Config.estimatedCostPerRun)
       }
     }
 
-    // Analyze loss curve
+    // Analyze loss curve — pick tier-specific baseline if available
     const curveSignal = analyzeLossCurve(run.metrics.stepLosses ?? [])
-    const baselineComparison = ctx.baselineCurve
-      ? compareToBaseline(curveSignal, ctx.baselineCurve.signal)
+    const effectiveBaseline = ctx.baselineCurves?.get(3) ?? ctx.baselineCurve
+    const baselineComparison = effectiveBaseline
+      ? compareToBaseline(curveSignal, effectiveBaseline.signal)
       : undefined
 
     // Post-gate
     const postGate = this.evaluatePostGate(run, ctx)
 
     return {
-      tier: 2, proposal, preGate, run, curveSignal, baselineComparison,
+      tier: 3, proposal, preGate, run, curveSignal, baselineComparison,
       postGate, promotable: postGate.passed,
     }
   }
 
   private checkPreGate(ctx: TierRunnerContext): TierGateResult {
-    const tier2Config = ctx.policy.tiers.tier2
-    if (!tier2Config?.enabled) {
-      return { passed: false, reason: 'Tier 2 not enabled' }
+    const tier3Config = ctx.policy.tiers.tier3
+    if (!tier3Config?.enabled) {
+      return { passed: false, reason: 'Tier 3 not enabled' }
     }
     if (!process.env.RUNPOD_API_KEY) {
       return { passed: false, reason: 'RUNPOD_API_KEY not set' }
     }
-    if (!this.costTracker.canAfford(tier2Config.estimatedCostPerRun)) {
+    if (!this.costTracker.canAfford(tier3Config.estimatedCostPerRun)) {
       return {
         passed: false,
-        reason: `Budget exceeded: $${this.costTracker.getRemaining().toFixed(2)} remaining, need $${tier2Config.estimatedCostPerRun.toFixed(2)}`,
+        reason: `Budget exceeded: $${this.costTracker.getRemaining().toFixed(2)} remaining, need $${tier3Config.estimatedCostPerRun.toFixed(2)}`,
       }
     }
     return { passed: true, reason: 'Pre-gate passed' }
@@ -206,30 +205,29 @@ export class Tier2Runner implements TierRunner {
     }
     return {
       passed: true,
-      reason: `Tier 2 passed: val_bpb=${run.metrics.valBpb.toFixed(4)}`,
+      reason: `Tier 3 passed: val_bpb=${run.metrics.valBpb.toFixed(4)}`,
       riskScore: 0.1,
     }
   }
 
   private buildTrainCommand(ctx: TierRunnerContext): string {
-    const tier2 = ctx.policy.tiers.tier2!
+    const tier3 = ctx.policy.tiers.tier3!
     // Validate all config paths against safe characters to prevent shell injection
     const safePath = /^[a-zA-Z0-9_.\-\/]+$/
-    for (const [name, value] of [['dataPath', tier2.dataPath], ['tokenizerPath', tier2.tokenizerPath], ['trainScript', tier2.trainScript]] as const) {
+    for (const [name, value] of [['dataPath', tier3.dataPath], ['tokenizerPath', tier3.tokenizerPath], ['trainScript', tier3.trainScript]] as const) {
       if (!safePath.test(value)) {
-        throw new Error(`Unsafe characters in tier2 config ${name}: ${value}`)
+        throw new Error(`Unsafe characters in tier3 config ${name}: ${value}`)
       }
     }
     const parts = [
       'cd /workspace &&',
       'PYTHONPATH=/workspace/site-packages',
-      'LOCAL_RANK=0 RANK=0 WORLD_SIZE=1 MASTER_ADDR=localhost MASTER_PORT=29500',
-      `MAX_WALLCLOCK_SECONDS=${Math.floor(tier2.maxWallclockSec)}`,
-      `DATA_PATH='${tier2.dataPath}'`,
-      `TOKENIZER_PATH='${tier2.tokenizerPath}'`,
+      `MAX_WALLCLOCK_SECONDS=${Math.floor(tier3.maxWallclockSec)}`,
+      `DATA_PATH='${tier3.dataPath}'`,
+      `TOKENIZER_PATH='${tier3.tokenizerPath}'`,
       'TRAIN_LOG_EVERY=5',
       'VAL_LOSS_EVERY=0',
-      `python3 '/workspace/${tier2.trainScript}' 2>&1`,
+      `torchrun --standalone --nproc_per_node=${tier3.gpuCount} /workspace/${tier3.trainScript} 2>&1`,
     ]
     return parts.join(' ')
   }

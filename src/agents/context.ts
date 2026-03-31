@@ -1,11 +1,13 @@
 import type { Board } from '../schema/board.js'
 import type { Precedent } from '../schema/precedent.js'
+import type { RLFeedback } from '../memory/feedback-aggregator.js'
 
 export interface AgentContextOptions {
   coverageMarkdown?: string
   explorationMode?: boolean
   explorationTargets?: string[]
   baselineSignal?: { descentRate: number; lossDrop: number }
+  rlFeedback?: RLFeedback
 }
 
 export function buildAgentContext(
@@ -47,8 +49,54 @@ export function buildAgentContext(
     sections.push(options.coverageMarkdown)
   }
 
-  // 4. Exploration directive (if active)
-  if (options?.explorationMode && options?.explorationTargets && options.explorationTargets.length > 0) {
+  // 4. RL Feedback (if provided)
+  if (options?.rlFeedback) {
+    const rl = options.rlFeedback
+    const rlLines: string[] = ['## RL Feedback (from past experiments)']
+
+    if (rl.highImpactFamilies.length > 0) {
+      rlLines.push('### High-impact technique families')
+      for (const f of rl.highImpactFamilies) {
+        rlLines.push(
+          `- ${f.family}: ${f.trials} trials, ${(f.positiveRate * 100).toFixed(0)}% positive, avg improvement ${f.avgPositiveDelta.toFixed(4)} bpb`,
+        )
+      }
+    }
+
+    if (rl.avoidFamilies.length > 0) {
+      rlLines.push('### Families to avoid')
+      for (const f of rl.avoidFamilies) {
+        rlLines.push(
+          `- ${f.family}: ${f.trials} trials, ${(f.invalidRate * 100).toFixed(0)}% invalid / ${(f.negativeRate * 100).toFixed(0)}% negative`,
+        )
+      }
+    }
+
+    // Look up agent-specific stats by category
+    const agentCategories = ['architecture', 'compression', 'training']
+    for (const cat of agentCategories) {
+      const stat = rl.agentStats[cat]
+      if (stat) {
+        rlLines.push(`### ${cat} agent performance`)
+        rlLines.push(
+          `- Success rate: ${(stat.positiveRate * 100).toFixed(0)}% positive, ${(stat.negativeRate * 100).toFixed(0)}% negative, ${(stat.invalidRate * 100).toFixed(0)}% invalid`,
+        )
+        rlLines.push(`- Average delta: ${stat.avgDelta.toFixed(4)} bpb`)
+      }
+    }
+
+    if (rl.suggestedDirections.length > 0) {
+      rlLines.push('### Suggested directions')
+      for (const s of rl.suggestedDirections) {
+        rlLines.push(`- ${s}`)
+      }
+    }
+
+    sections.push(rlLines.join('\n'))
+  }
+
+  // 5. Exploration directive (if active)
+  if (options?.explorationMode && options.explorationTargets && options.explorationTargets.length > 0) {
     const explorationLines = [
       '## EXPLORATION MODE (ACTIVE)',
       'You are in exploration mode this cycle. You MUST propose an experiment targeting',
@@ -62,7 +110,7 @@ export function buildAgentContext(
     sections.push(explorationLines.join('\n'))
   }
 
-  // 5. Baseline signal (if provided)
+  // 6. Baseline signal (if provided)
   if (options?.baselineSignal) {
     sections.push(
       [
@@ -73,7 +121,7 @@ export function buildAgentContext(
     )
   }
 
-  // 6. Challenge constraints
+  // 7. Challenge constraints
   sections.push(
     [
       '## Challenge Constraints',
@@ -86,7 +134,7 @@ export function buildAgentContext(
     ].join('\n'),
   )
 
-  // 7. Source code
+  // 8. Source code
   sections.push(`## Current train_gpt_mlx.py source:\n\n${sourceCode}`)
 
   return sections.join('\n\n')

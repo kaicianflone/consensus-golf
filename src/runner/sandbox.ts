@@ -125,8 +125,12 @@ export async function runExperiment(
     HTTPS_PROXY: '',
   }
 
+  // Prefer .venv python if available (has MLX, numpy, sentencepiece)
+  const venvPython = path.resolve('.venv/bin/python3')
+  const pythonBin = fs.existsSync(venvPython) ? venvPython : 'python3'
+
   const resolvedScriptPath = path.resolve(scriptPath)
-  const child = spawn('python3', [resolvedScriptPath], {
+  const child = spawn(pythonBin, [resolvedScriptPath], {
     env,
     cwd: resolvedRepoPath,
     stdio: ['ignore', 'pipe', 'pipe'],

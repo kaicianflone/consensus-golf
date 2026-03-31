@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { Tier2Runner } from '../../src/runner/tier2-runner.js'
+import { Tier3Runner } from '../../src/runner/tier3-runner.js'
 import { CostTracker } from '../../src/runner/cost-tracker.js'
 import type { Proposal } from '../../src/schema/proposal.js'
 import type { TierRunnerContext } from '../../src/runner/tier-runner.js'
@@ -16,8 +16,8 @@ const MOCK_TRAINING_OUTPUT = [
 
 function createMockClient() {
   return {
-    createPod: vi.fn().mockResolvedValue('pod-test-123'),
-    waitForRunning: vi.fn().mockResolvedValue({ id: 'pod-test-123', desiredStatus: 'RUNNING' }),
+    createPod: vi.fn().mockResolvedValue('pod-test-456'),
+    waitForRunning: vi.fn().mockResolvedValue({ id: 'pod-test-456', desiredStatus: 'RUNNING' }),
     uploadScript: vi.fn().mockResolvedValue(undefined),
     executeCommand: vi.fn().mockResolvedValue(MOCK_TRAINING_OUTPUT),
     terminatePod: vi.fn().mockResolvedValue(undefined),
@@ -48,6 +48,19 @@ function createCtx(overrides?: Partial<TierRunnerContext>): TierRunnerContext {
           estimatedCostPerRun: 1.0,
           enabled: true,
         },
+        tier3: {
+          gpuType: 'NVIDIA H100 80GB HBM3',
+          gpuCount: 8,
+          templateId: 'tmpl-456',
+          containerImage: 'runpod/pytorch',
+          volumeId: 'vol-456',
+          dataPath: '/workspace/data',
+          tokenizerPath: '/workspace/tokenizer',
+          trainScript: 'train_gpt.py',
+          maxWallclockSec: 600,
+          estimatedCostPerRun: 3.50,
+          enabled: true,
+        },
       },
     },
     pgolf: {
@@ -62,7 +75,7 @@ function createCtx(overrides?: Partial<TierRunnerContext>): TierRunnerContext {
 
 function createProposal(): Proposal {
   return {
-    id: 'prop-123', boardId: 'test', agent: 'architecture',
+    id: 'prop-456', boardId: 'test', agent: 'architecture',
     status: 'approved', title: 'Test proposal', category: 'architecture',
     thesis: 'Test', patchDescription: 'Test', modifiedSource: 'print("modified")',
     predictedImpact: {}, risks: [], precedentRefs: [],
@@ -70,19 +83,56 @@ function createProposal(): Proposal {
   }
 }
 
-describe('Tier2Runner', () => {
-  it('returns promotable: false when tier2 disabled', async () => {
+describe('Tier3Runner', () => {
+  it('creates pod with gpuCount 8', async () => {
+    const client = createMockClient()
+    const runner = new Tier3Runner(client, new CostTracker(100))
+    process.env.RUNPOD_API_KEY = 'test-key'
+    await runner.run(createProposal(), createCtx())
+    expect(client.createPod).toHaveBeenCalledWith(
+      expect.objectContaining({ gpuCount: 8 }),
+      expect.any(String),
+    )
+    delete process.env.RUNPOD_API_KEY
+  })
+
+  it('uses torchrun command without manual DDP env vars', async () => {
+    const client = createMockClient()
+    const runner = new Tier3Runner(client, new CostTracker(100))
+    process.env.RUNPOD_API_KEY = 'test-key'
+    await runner.run(createProposal(), createCtx())
+    // The training command is the last executeCommand call (after pip install)
+    const calls = client.executeCommand.mock.calls
+    const trainCommand = calls[calls.length - 1][1] as string
+    expect(trainCommand).toContain('torchrun --standalone --nproc_per_node=8')
+    expect(trainCommand).not.toContain('LOCAL_RANK=')
+    expect(trainCommand).not.toContain('RANK=')
+    expect(trainCommand).not.toContain('WORLD_SIZE=')
+    expect(trainCommand).not.toContain('MASTER_ADDR=')
+    expect(trainCommand).not.toContain('MASTER_PORT=')
+    delete process.env.RUNPOD_API_KEY
+  })
+
+  it('returns promotable: false when tier3 not enabled', async () => {
     const ctx = createCtx()
-    ctx.policy.tiers.tier2!.enabled = false
-    const runner = new Tier2Runner(createMockClient(), new CostTracker(100))
+    ctx.policy.tiers.tier3!.enabled = false
+    const runner = new Tier3Runner(createMockClient(), new CostTracker(100))
     const result = await runner.run(createProposal(), ctx)
     expect(result.promotable).toBe(false)
     expect(result.preGate.reason).toContain('not enabled')
   })
 
-  it('returns promotable: false when budget exceeded', async () => {
-    const costTracker = new CostTracker(0.5) // only $0.50
-    const runner = new Tier2Runner(createMockClient(), costTracker)
+  it('returns promotable: false when RUNPOD_API_KEY not set', async () => {
+    delete process.env.RUNPOD_API_KEY
+    const runner = new Tier3Runner(createMockClient(), new CostTracker(100))
+    const result = await runner.run(createProposal(), createCtx())
+    expect(result.promotable).toBe(false)
+    expect(result.preGate.reason).toContain('RUNPOD_API_KEY')
+  })
+
+  it('returns promotable: false when budget insufficient', async () => {
+    const costTracker = new CostTracker(1.0) // only $1.00, need $3.50
+    const runner = new Tier3Runner(createMockClient(), costTracker)
     process.env.RUNPOD_API_KEY = 'test-key'
     const result = await runner.run(createProposal(), createCtx())
     expect(result.promotable).toBe(false)
@@ -90,26 +140,21 @@ describe('Tier2Runner', () => {
     delete process.env.RUNPOD_API_KEY
   })
 
-  it('executes full pod lifecycle on success', async () => {
+  it('sets PYTHONPATH in training command', async () => {
     const client = createMockClient()
-    const costTracker = new CostTracker(100)
-    const runner = new Tier2Runner(client, costTracker)
+    const runner = new Tier3Runner(client, new CostTracker(100))
     process.env.RUNPOD_API_KEY = 'test-key'
-    const result = await runner.run(createProposal(), createCtx())
-    expect(client.createPod).toHaveBeenCalled()
-    expect(client.waitForRunning).toHaveBeenCalled()
-    expect(client.uploadScript).toHaveBeenCalled()
-    expect(client.executeCommand).toHaveBeenCalled()
-    expect(client.terminatePod).toHaveBeenCalled()
-    expect(result.run).toBeDefined()
-    expect(result.run?.metrics.valBpb).toBe(1.23)
+    await runner.run(createProposal(), createCtx())
+    const calls = client.executeCommand.mock.calls
+    const trainCommand = calls[calls.length - 1][1] as string
+    expect(trainCommand).toContain('PYTHONPATH=/workspace/site-packages')
     delete process.env.RUNPOD_API_KEY
   })
 
   it('terminates pod on execution error', async () => {
     const client = createMockClient()
     client.executeCommand.mockRejectedValue(new Error('SSH failed'))
-    const runner = new Tier2Runner(client, new CostTracker(100))
+    const runner = new Tier3Runner(client, new CostTracker(100))
     process.env.RUNPOD_API_KEY = 'test-key'
     const result = await runner.run(createProposal(), createCtx())
     expect(client.terminatePod).toHaveBeenCalled()
@@ -121,18 +166,10 @@ describe('Tier2Runner', () => {
     const client = createMockClient()
     client.executeCommand.mockRejectedValue(new Error('failed'))
     const costTracker = new CostTracker(100)
-    const runner = new Tier2Runner(client, costTracker)
+    const runner = new Tier3Runner(client, costTracker)
     process.env.RUNPOD_API_KEY = 'test-key'
     await runner.run(createProposal(), createCtx())
-    expect(costTracker.getSpent()).toBe(1.0) // RunPod bills regardless of outcome
+    expect(costTracker.getSpent()).toBe(3.5) // RunPod bills regardless of outcome
     delete process.env.RUNPOD_API_KEY
-  })
-
-  it('returns promotable: false when RUNPOD_API_KEY not set', async () => {
-    delete process.env.RUNPOD_API_KEY
-    const runner = new Tier2Runner(createMockClient(), new CostTracker(100))
-    const result = await runner.run(createProposal(), createCtx())
-    expect(result.promotable).toBe(false)
-    expect(result.preGate.reason).toContain('RUNPOD_API_KEY')
   })
 })

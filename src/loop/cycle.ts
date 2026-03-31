@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import type { CycleContext } from './context.js'
 import type { Proposal } from '../schema/proposal.js'
+import type { Board } from '../schema/board.js'
 import type { Judgment } from '../schema/judgment.js'
 import { architectureAgent } from '../agents/architecture.js'
 import { compressionAgent } from '../agents/compression.js'
@@ -14,12 +15,15 @@ import { analyzeLossCurve, compareToBaseline } from '../runner/loss-curve-analyz
 import { Tier0Runner } from '../runner/tier0-runner.js'
 import { Tier1Runner } from '../runner/tier1-runner.js'
 import { Tier2Runner } from '../runner/tier2-runner.js'
+import { Tier3Runner } from '../runner/tier3-runner.js'
 import { RunPodsClient } from '../runner/runpods-client.js'
 import { CostTracker } from '../runner/cost-tracker.js'
 import { PipelineOrchestrator } from '../runner/pipeline.js'
-import type { TierRunnerContext, TierRunResult } from '../runner/tier-runner.js'
+import type { TierRunner, TierRunnerContext, TierRunResult } from '../runner/tier-runner.js'
+import type { BaselineCurve } from '../persistence/baseline-manager.js'
 import { getExplorerForCycle } from '../agents/exploration.js'
 import type { AgentContextOptions } from '../agents/context.js'
+import { FeedbackAggregator } from '../memory/feedback-aggregator.js'
 import type { CycleResult } from './summary-report.js'
 
 export async function runCycle(
@@ -38,6 +42,8 @@ export async function runCycle(
     tier1Passed: 0,
     tier2Attempted: 0,
     tier2Passed: 0,
+    tier3Attempted: 0,
+    tier3Passed: 0,
     bestValBpb: undefined as number | undefined,
     bestTechnique: undefined as string | undefined,
     bestProposalId: undefined as string | undefined,
@@ -143,12 +149,17 @@ export async function runCycle(
     ? { descentRate: baselineCurve.signal.descentRate, lossDrop: baselineCurve.signal.lossDrop }
     : undefined
 
+  // Build RL feedback from precedents
+  const feedbackAggregator = new FeedbackAggregator()
+  const rlFeedback = feedbackAggregator.aggregate(allPrecedentsForCoverage, coverageMap.unexplored.map(e => e.family))
+
   function agentContextOptions(agentName: string): AgentContextOptions {
     return {
       coverageMarkdown,
       explorationMode: agentName === explorerName,
       explorationTargets: agentName === explorerName ? explorationTargets : undefined,
       baselineSignal: baselineSignalForAgents,
+      rlFeedback,
     }
   }
 
@@ -198,12 +209,27 @@ export async function runCycle(
 
   const tier0 = new Tier0Runner()
   const tier1 = new Tier1Runner()
-  const runners: Array<InstanceType<typeof Tier0Runner> | InstanceType<typeof Tier1Runner> | Tier2Runner> = [tier0, tier1]
-  if (config.policy.tiers.tier2?.enabled && process.env.RUNPOD_API_KEY) {
-    const rpClient = new RunPodsClient(process.env.RUNPOD_API_KEY)
-    runners.push(new Tier2Runner(rpClient, ctx.costTracker ?? new CostTracker(50)))
+  const runners: TierRunner[] = [tier0, tier1]
+  const rpApiKey = process.env.RUNPOD_API_KEY
+  if (rpApiKey) {
+    const rpClient = new RunPodsClient(rpApiKey)
+    const costTracker = ctx.costTracker ?? new CostTracker(50)
+    if (config.policy.tiers.tier2?.enabled) {
+      runners.push(new Tier2Runner(rpClient, costTracker))
+    }
+    if (config.policy.tiers.tier3?.enabled) {
+      runners.push(new Tier3Runner(rpClient, costTracker))
+    }
   }
   const pipeline = new PipelineOrchestrator(runners, audit)
+
+  const baselineCurves = new Map<number, BaselineCurve>()
+  const tier1Baseline = baseline.load(boardId)
+  if (tier1Baseline) baselineCurves.set(1, tier1Baseline)
+  const tier2Baseline = baseline.loadForTier(boardId, 2)
+  if (tier2Baseline) baselineCurves.set(2, tier2Baseline)
+  const tier3Baseline = baseline.loadForTier(boardId, 3)
+  if (tier3Baseline) baselineCurves.set(3, tier3Baseline)
 
   const tierCtx: TierRunnerContext = {
     sourceCode,
@@ -212,6 +238,7 @@ export async function runCycle(
     policy: config.policy,
     pgolf: config.pgolf,
     baselineCurve: baseline.load(boardId),
+    baselineCurves,
     onProgress: (agent: string, line: string) => progress.agent(agent, line),
   }
 
@@ -324,10 +351,86 @@ export async function runCycle(
   const promoted = pipeline.getPromoted(tier1Results, config.policy.tiers.tier1.maxPromotions)
   const updatedBoard = board.load(boardId) ?? boardState
 
-  for (const tierResult of tier1Results) {
+  await handleTierResults(tier1Results, 'Tier 1', {
+    llm, audit, precedents, board, consensus, progress, config, cycleStats, updatedBoard, boardId, cycleNum,
+  })
+
+  if (promoted.length > 0 && pipeline.hasTier(2)) {
+    progress.blank()
+    progress.phase(`Executing ${promoted.length} promoted proposal(s) on RunPods (Tier 2)...`)
+    const tier2Results = await pipeline.runTier(2, promoted.map(r => r.proposal), tierCtx, cycleNum)
+    cycleStats.tier2Attempted = tier2Results.length
+
+    await handleTierResults(tier2Results, 'Tier 2', {
+      llm, audit, precedents, board, consensus, progress, config, cycleStats, updatedBoard, boardId, cycleNum,
+      skipMerge: pipeline.hasTier(3),  // defer merge to Tier 3 if enabled
+    })
+
+    // Tier 2 -> 3 promotion (use getPromotedByBpb for val_bpb sorting)
+    const tier2MaxPromotions = config.policy.tiers.tier2?.maxPromotions ?? 1
+    const promotedToTier3 = pipeline.getPromotedByBpb(tier2Results, tier2MaxPromotions)
+    if (promotedToTier3.length > 0 && pipeline.hasTier(3)) {
+      progress.blank()
+      progress.phase(`Executing ${promotedToTier3.length} promoted proposal(s) on multi-GPU (Tier 3)...`)
+      const tier3Results = await pipeline.runTier(3, promotedToTier3.map(r => r.proposal), tierCtx, cycleNum)
+      cycleStats.tier3Attempted = tier3Results.length
+
+      await handleTierResults(tier3Results, 'Tier 3', {
+        llm, audit, precedents, board, consensus, progress, config, cycleStats, updatedBoard, boardId, cycleNum,
+      })
+    }
+
+    // Report cost
+    if (ctx.costTracker) {
+      const summary = ctx.costTracker.getSummary()
+      progress.phase(`GPU spend: $${summary.spent.toFixed(2)} / $${summary.budget.toFixed(2)} budget`)
+    }
+  } else if (promoted.length > 0) {
+    progress.phase(`Tier 1 promoted ${promoted.length} proposal(s) (Tier 2 not enabled)`)
+  }
+
+  progress.blank()
+  await printBalanceReport(ctx, agentIds, balancesBefore, cycleNumber, totalCycles)
+  return buildCycleResult()
+}
+
+interface HandleTierContext {
+  llm: CycleContext['llm']
+  audit: CycleContext['audit']
+  precedents: CycleContext['precedents']
+  board: CycleContext['board']
+  consensus: CycleContext['consensus']
+  progress: CycleContext['progress']
+  config: CycleContext['config']
+  cycleStats: {
+    tier1Passed: number
+    tier2Passed: number
+    tier3Passed: number
+    bestValBpb: number | undefined
+    bestTechnique: string | undefined
+    bestProposalId: string | undefined
+  }
+  updatedBoard: Board
+  boardId: string
+  cycleNum: number
+  skipMerge?: boolean  // true when results will be promoted to a higher tier
+}
+
+async function handleTierResults(
+  tierResults: TierRunResult[],
+  tierLabel: string,
+  hctx: HandleTierContext,
+): Promise<void> {
+  const { llm, audit, precedents, board, consensus, progress, config, cycleStats, updatedBoard, boardId, cycleNum } = hctx
+  const tierPassedMap: Record<string, 'tier1Passed' | 'tier2Passed' | 'tier3Passed'> = {
+    'Tier 1': 'tier1Passed', 'Tier 2': 'tier2Passed', 'Tier 3': 'tier3Passed',
+  }
+  const passedKey = tierPassedMap[tierLabel]
+
+  for (const tierResult of tierResults) {
     const { proposal, run, curveSignal, baselineComparison, postGate } = tierResult
     progress.blank()
-    progress.phase(`  Result: ${proposal.title} [${proposal.agent}]`)
+    progress.phase(`  ${tierLabel} Result: ${proposal.title} [${proposal.agent}]`)
     progress.pushIndent()
 
     if (run) {
@@ -349,8 +452,10 @@ export async function runCycle(
       }
 
       // Gate result
-      progress.agentResult(proposal.agent, `tier 1 gate: ${postGate.passed ? 'PASSED' : 'FAILED'} — ${postGate.reason}`, postGate.passed)
-      if (postGate.passed) cycleStats.tier1Passed++
+      progress.agentResult(proposal.agent, `${tierLabel.toLowerCase()} gate: ${postGate.passed ? 'PASSED' : 'FAILED'} — ${postGate.reason}`, postGate.passed)
+      if (postGate.passed) {
+        if (passedKey) cycleStats[passedKey]++
+      }
     }
 
     // Result judging + merge decision (only for runs that completed)
@@ -359,35 +464,35 @@ export async function runCycle(
         const currentBoard = board.load(boardId) ?? updatedBoard
         const precedent = await judgeResult(llm, proposal, run, currentBoard, config.agents.judgeMaxTokens)
         precedents.append(precedent)
-        audit.write(cycleNum, 'precedent_created', precedent.id, `Precedent created: [${precedent.outcome}] ${precedent.summary}`, { outcome: precedent.outcome, family: precedent.family, delta: precedent.metrics.delta }, proposal.agent)
+        audit.write(cycleNum, 'precedent_created', precedent.id, `Precedent created: [${precedent.outcome}] ${precedent.summary}`, { outcome: precedent.outcome, family: precedent.family, delta: precedent.metrics.delta, tier: tierResult.tier }, proposal.agent)
 
         const currentBoardState = board.load(boardId) ?? currentBoard
-        if (postGate.passed && run.status === 'passed' && shouldMerge(run.metrics, currentBoardState, config.policy.merge, config.pgolf.maxArtifactBytes)) {
+        if (!hctx.skipMerge && postGate.passed && run.status === 'passed' && shouldMerge(run.metrics, currentBoardState, config.policy.merge, config.pgolf.maxArtifactBytes)) {
           board.updateBest(boardId, {
             valBpb: run.metrics.valBpb!,
             artifactBytes: run.metrics.artifactBytes ?? currentBoardState.currentBest.artifactBytes,
             commitRef: run.id,
             proposalId: proposal.id,
           })
-          progress.agentResult(proposal.agent, 'MERGED: new best result!', true)
+          progress.agentResult(proposal.agent, `MERGED from ${tierLabel}: new best result!`, true)
           if (run.metrics.valBpb !== undefined && (cycleStats.bestValBpb === undefined || run.metrics.valBpb < cycleStats.bestValBpb)) {
             cycleStats.bestValBpb = run.metrics.valBpb
             cycleStats.bestTechnique = proposal.title
             cycleStats.bestProposalId = proposal.id
           }
-          audit.write(cycleNum, 'baseline_updated', boardId, `Board updated with new best from proposal ${proposal.id}`, { valBpb: run.metrics.valBpb, artifactBytes: run.metrics.artifactBytes, proposalId: proposal.id }, proposal.agent)
+          audit.write(cycleNum, 'baseline_updated', boardId, `Board updated from ${tierLabel} proposal ${proposal.id}`, { valBpb: run.metrics.valBpb, artifactBytes: run.metrics.artifactBytes, proposalId: proposal.id, tier: tierResult.tier }, proposal.agent)
 
           try {
-            await consensus.rewardAgent(proposal.agent, config.consensus.rewards.merge, 'merge accepted')
+            await consensus.rewardAgent(proposal.agent, config.consensus.rewards.merge, `${tierLabel.toLowerCase()} merge accepted`)
           } catch (err) {
             progress.agentResult(proposal.agent, `ledger reward failed: ${String(err)}`, false)
           }
         } else {
           try {
             if (precedent.outcome === 'positive' || precedent.outcome === 'negative') {
-              await consensus.rewardAgent(proposal.agent, config.consensus.rewards.usefulResult, `useful ${precedent.outcome} result`)
+              await consensus.rewardAgent(proposal.agent, config.consensus.rewards.usefulResult, `useful ${tierLabel.toLowerCase()} ${precedent.outcome} result`)
             } else if (precedent.outcome === 'invalid') {
-              await consensus.slashAgent(proposal.agent, config.consensus.rewards.penalizeInvalid, 'invalid experiment result')
+              await consensus.slashAgent(proposal.agent, config.consensus.rewards.penalizeInvalid, `invalid ${tierLabel.toLowerCase()} experiment`)
             }
           } catch (err) {
             progress.agentResult(proposal.agent, `ledger update failed: ${String(err)}`, false)
@@ -400,85 +505,6 @@ export async function runCycle(
 
     progress.popIndent()
   }
-
-  if (promoted.length > 0 && pipeline.hasTier(2)) {
-    progress.blank()
-    progress.phase(`Executing ${promoted.length} promoted proposal(s) on RunPods (Tier 2)...`)
-    const tier2Results = await pipeline.runTier(2, promoted.map(r => r.proposal), tierCtx, cycleNum)
-    cycleStats.tier2Attempted = tier2Results.length
-
-    for (const tierResult of tier2Results) {
-      const { proposal, run, curveSignal, baselineComparison, postGate } = tierResult
-      progress.blank()
-      progress.phase(`  Tier 2 Result: ${proposal.title} [${proposal.agent}]`)
-      progress.pushIndent()
-
-      if (run) {
-        if (run.metrics.valBpb !== undefined) {
-          progress.metric('val_bpb', run.metrics.valBpb, updatedBoard.baseline.valBpb)
-        }
-        progress.agentResult(proposal.agent, `tier 2 gate: ${postGate.passed ? 'PASSED' : 'FAILED'} — ${postGate.reason}`, postGate.passed)
-        if (postGate.passed) cycleStats.tier2Passed++
-
-        // Result judging + merge (same as tier 1)
-        try {
-          const currentBoard = board.load(boardId) ?? updatedBoard
-          const precedent = await judgeResult(llm, proposal, run, currentBoard, config.agents.judgeMaxTokens)
-          precedents.append(precedent)
-          audit.write(cycleNum, 'precedent_created', precedent.id, `Precedent created: [${precedent.outcome}] ${precedent.summary}`, { outcome: precedent.outcome, family: precedent.family, delta: precedent.metrics.delta, tier: 2 }, proposal.agent)
-
-          const currentBoardState = board.load(boardId) ?? currentBoard
-          if (run.status === 'passed' && shouldMerge(run.metrics, currentBoardState, config.policy.merge, config.pgolf.maxArtifactBytes)) {
-            board.updateBest(boardId, {
-              valBpb: run.metrics.valBpb!,
-              artifactBytes: run.metrics.artifactBytes ?? currentBoardState.currentBest.artifactBytes,
-              commitRef: run.id,
-              proposalId: proposal.id,
-            })
-            progress.agentResult(proposal.agent, 'MERGED from Tier 2: new best result!', true)
-            if (run.metrics.valBpb !== undefined && (cycleStats.bestValBpb === undefined || run.metrics.valBpb < cycleStats.bestValBpb)) {
-              cycleStats.bestValBpb = run.metrics.valBpb
-              cycleStats.bestTechnique = proposal.title
-              cycleStats.bestProposalId = proposal.id
-            }
-            audit.write(cycleNum, 'baseline_updated', boardId, `Board updated from Tier 2 proposal ${proposal.id}`, { valBpb: run.metrics.valBpb, artifactBytes: run.metrics.artifactBytes, proposalId: proposal.id, tier: 2 }, proposal.agent)
-
-            try {
-              await consensus.rewardAgent(proposal.agent, config.consensus.rewards.merge, 'tier 2 merge accepted')
-            } catch (err) {
-              progress.agentResult(proposal.agent, `ledger reward failed: ${String(err)}`, false)
-            }
-          } else {
-            try {
-              if (precedent.outcome === 'positive' || precedent.outcome === 'negative') {
-                await consensus.rewardAgent(proposal.agent, config.consensus.rewards.usefulResult, `useful tier 2 ${precedent.outcome} result`)
-              } else if (precedent.outcome === 'invalid') {
-                await consensus.slashAgent(proposal.agent, config.consensus.rewards.penalizeInvalid, 'invalid tier 2 experiment')
-              }
-            } catch (err) {
-              progress.agentResult(proposal.agent, `ledger update failed: ${String(err)}`, false)
-            }
-          }
-        } catch (err) {
-          progress.agentResult(proposal.agent, `result judging failed: ${String(err)}`, false)
-        }
-      }
-
-      progress.popIndent()
-    }
-
-    // Report cost
-    if (ctx.costTracker) {
-      const summary = ctx.costTracker.getSummary()
-      progress.phase(`GPU spend: $${summary.spent.toFixed(2)} / $${summary.budget.toFixed(2)} budget`)
-    }
-  } else if (promoted.length > 0) {
-    progress.phase(`Tier 1 promoted ${promoted.length} proposal(s) (Tier 2 not enabled)`)
-  }
-
-  progress.blank()
-  await printBalanceReport(ctx, agentIds, balancesBefore, cycleNumber, totalCycles)
-  return buildCycleResult()
 }
 
 async function printBalanceReport(

@@ -2,7 +2,7 @@
   "execution": {
     "smokeIterations": 50,
     "smokeBatchTokens": 8192,
-    "smokeMaxWallclockSec": 3600,
+    "smokeMaxWallclockSec": 600,
     "valBatchSize": 8192,
     "requireSmokeBeforeFull": true
   },
@@ -19,13 +19,27 @@
       "gpuCount": 1,
       "templateId": "",
       "containerImage": "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04",
-      "volumeId": "mj4ve5tkh5",
+      "volumeId": "fmbckw29gp",
       "dataPath": "/workspace/datasets/datasets/fineweb10B_sp1024",
       "tokenizerPath": "/workspace/datasets/tokenizers/fineweb_1024_bpe.model",
       "trainScript": "train_gpt.py",
-      "maxWallclockSec": 900,
-      "estimatedCostPerRun": 1.0,
-      "enabled": true
+      "maxWallclockSec": 600,
+      "estimatedCostPerRun": 0.45,
+      "enabled": true,
+      "maxPromotions": 1
+    },
+    "tier3": {
+      "gpuType": "NVIDIA H100 80GB HBM3",
+      "gpuCount": 8,
+      "templateId": "",
+      "containerImage": "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04",
+      "volumeId": "fmbckw29gp",
+      "dataPath": "/workspace/datasets/datasets/fineweb10B_sp1024",
+      "tokenizerPath": "/workspace/datasets/tokenizers/fineweb_1024_bpe.model",
+      "trainScript": "train_gpt.py",
+      "maxWallclockSec": 600,
+      "estimatedCostPerRun": 3.50,
+      "enabled": false
     }
   }
 }

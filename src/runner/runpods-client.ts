@@ -39,6 +39,12 @@ export class RunPodsClient {
     this.endpoint = `https://api.runpod.io/graphql?api_key=${apiKey}`
   }
 
+  private validatePodId(podId: string): void {
+    if (!/^[a-z0-9\-]+$/.test(podId)) {
+      throw new RunPodsApiError(`Invalid pod ID: ${podId}`)
+    }
+  }
+
   private async graphql<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
     const body: Record<string, unknown> = { query }
     if (variables) body.variables = variables
@@ -48,7 +54,8 @@ export class RunPodsClient {
       body: JSON.stringify(body),
     })
     if (!res.ok) {
-      throw new RunPodsApiError(`RunPods API HTTP ${res.status}: ${res.statusText}`)
+      const body = await res.text().catch(() => '')
+      throw new RunPodsApiError(`RunPods API HTTP ${res.status}: ${res.statusText}${body ? ` — ${body.slice(0, 500)}` : ''}`)
     }
     const json = await res.json() as { data?: T; errors?: unknown[] }
     if (json.errors) {
@@ -87,26 +94,39 @@ export class RunPodsClient {
   }
 
   async getPodStatus(podId: string): Promise<PodInfo> {
-    const query = `query GetPod($input: PodInput!) {
-      pod(input: $input) {
+    this.validatePodId(podId)
+    const query = `query GetPod {
+      pod(input: {podId: "${podId}"}) {
         id desiredStatus costPerHr
         runtime { uptimeInSeconds ports { ip isIpPublic privatePort publicPort type } }
       }
     }`
 
-    const data = await this.graphql<{ pod: PodInfo }>(query, { input: { podId } })
+    const data = await this.graphql<{ pod: PodInfo }>(query)
     return data.pod
   }
 
   async waitForRunning(podId: string, timeoutMs = 120_000, pollIntervalMs = 5_000): Promise<PodInfo> {
     const deadline = Date.now() + timeoutMs
+    let consecutiveErrors = 0
     while (Date.now() < deadline) {
-      const info = await this.getPodStatus(podId)
-      if (info.desiredStatus === 'RUNNING' && info.runtime?.ports && info.runtime.ports.length > 0) {
-        return info
-      }
-      if (info.desiredStatus === 'EXITED' || info.desiredStatus === 'ERROR') {
-        throw new RunPodsApiError(`Pod ${podId} entered ${info.desiredStatus} status`)
+      try {
+        const info = await this.getPodStatus(podId)
+        consecutiveErrors = 0
+        if (info.desiredStatus === 'RUNNING' && info.runtime?.ports && info.runtime.ports.length > 0) {
+          return info
+        }
+        if (info.desiredStatus === 'EXITED' || info.desiredStatus === 'ERROR') {
+          throw new RunPodsApiError(`Pod ${podId} entered ${info.desiredStatus} status`)
+        }
+      } catch (err) {
+        // Re-throw terminal pod states immediately (EXITED/ERROR)
+        if (err instanceof RunPodsApiError && /entered (EXITED|ERROR) status/.test(err.message)) {
+          throw err
+        }
+        // Pods in transitional states can return 400/500 — retry up to 5 times
+        consecutiveErrors++
+        if (consecutiveErrors >= 5) throw err
       }
       await new Promise(resolve => setTimeout(resolve, pollIntervalMs))
     }
@@ -124,8 +144,9 @@ export class RunPodsClient {
   }
 
   async getSshAddress(podId: string): Promise<string> {
-    const query = `query GetPodSsh($input: PodInput!) { pod(input: $input) { machine { podHostId } } }`
-    const data = await this.graphql<{ pod: { machine: { podHostId: string } } }>(query, { input: { podId } })
+    this.validatePodId(podId)
+    const query = `query GetPodSsh { pod(input: {podId: "${podId}"}) { machine { podHostId } } }`
+    const data = await this.graphql<{ pod: { machine: { podHostId: string } } }>(query)
     return `${data.pod.machine.podHostId}@ssh.runpod.io`
   }
 
@@ -179,36 +200,30 @@ export class RunPodsClient {
   }
 
   /**
-   * Upload file content to a pod via base64 encoding over SSH.
+   * Upload file content to a pod via heredoc over SSH stdin.
+   * RunPod requires PTY (-tt), so we disable echo first to prevent the PTY
+   * from reflecting the entire base64 payload back through stdout.
    */
   async uploadScript(podId: string, content: string, remotePath: string): Promise<void> {
-    // Validate remotePath to prevent shell injection
     if (!/^[a-zA-Z0-9_.\-\/]+$/.test(remotePath)) {
       throw new RunPodsApiError(`Unsafe remote path: ${remotePath}`)
     }
     const b64 = Buffer.from(content).toString('base64')
-    // Split into chunks to avoid shell line length limits
-    const chunkSize = 50000
-    const chunks = []
-    for (let i = 0; i < b64.length; i += chunkSize) {
-      chunks.push(b64.slice(i, i + chunkSize))
-    }
 
-    let cmd: string
-    if (chunks.length === 1) {
-      cmd = `echo '${chunks[0]}' | base64 -d > ${remotePath} && echo UPLOADED $(wc -c < ${remotePath}) bytes`
-    } else {
-      // For large files, write chunks to a temp file then decode
-      const cmds = chunks.map((chunk, i) =>
-        i === 0 ? `echo '${chunk}' > /tmp/cgolf_upload.b64` : `echo '${chunk}' >> /tmp/cgolf_upload.b64`
-      )
-      cmds.push(`base64 -d /tmp/cgolf_upload.b64 > ${remotePath} && rm /tmp/cgolf_upload.b64 && echo UPLOADED $(wc -c < ${remotePath}) bytes`)
-      cmd = cmds.join(' && ')
-    }
+    const cmd = [
+      'stty -echo 2>/dev/null',
+      `cat > /tmp/cgolf_upload.b64 << 'CGOLF_EOF'`,
+      b64,
+      'CGOLF_EOF',
+      `base64 -d /tmp/cgolf_upload.b64 > ${remotePath}`,
+      'rm /tmp/cgolf_upload.b64',
+      'stty echo 2>/dev/null',
+      `echo UPLOADED $(wc -c < ${remotePath}) bytes`,
+    ].join('\n')
 
-    const output = await this.executeCommand(podId, cmd, 60_000)
+    const output = await this.executeCommand(podId, cmd, 120_000)
     if (!output.includes('UPLOADED')) {
-      throw new RunPodsApiError(`Script upload failed: ${output.slice(-200)}`)
+      throw new RunPodsApiError(`Script upload failed: ${output.slice(-300)}`)
     }
   }
 }
