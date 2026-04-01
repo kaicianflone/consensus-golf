@@ -104,35 +104,28 @@ async function main() {
     )
     const verCheck = await client.executeCommand(podId,
       'PYTHONPATH=/workspace/site-packages python3 -c "import torch; print(torch.__version__, torch.version.cuda)"',
-      30_000)
+      120_000)
     console.log('PyTorch version:', verCheck.trim().split('\n').pop())
     console.log('Dependencies ready...')
 
     if (noVolume) {
       console.log('Setting up dataset on pod (--no-volume mode)...')
       const setupOutput = await client.executeCommand(podId, [
-        'cd /workspace',
-        'git clone --depth 1 https://github.com/KellerJordan/modded-nanogpt.git pgolf 2>&1 | tail -3',
         'pip install -q huggingface_hub',
-        'cd pgolf && python data/cached_fineweb10B.py 0 2>&1',
-        'echo "=== FILES ===" && find /workspace/pgolf/data -type f \\( -name "*.bin" -o -name "*.model" -o -name "*.vocab" \\) 2>/dev/null | head -20',
-        // Symlink the downloaded data to where the training script expects it
-        'mkdir -p /workspace/datasets/datasets /workspace/datasets/tokenizers',
-        'ln -sfn /workspace/pgolf/data/fineweb10B /workspace/datasets/datasets/fineweb10B_sp1024',
-        'ls -la /workspace/datasets/datasets/fineweb10B_sp1024/',
+        `mkdir -p ${tier2.dataPath} $(dirname ${tier2.tokenizerPath})`,
+        'python3 -c "' +
+          'from huggingface_hub import hf_hub_download; import shutil, os; ' +
+          `[shutil.copy(hf_hub_download(\\"willdepueoai/parameter-golf\\", f, subfolder=\\"datasets/datasets/fineweb10B_sp1024\\", repo_type=\\"dataset\\"), ` +
+            `\\"${tier2.dataPath}/\\" + f) ` +
+            `for f in [\\"fineweb_train_000000.bin\\", \\"fineweb_val_000000.bin\\"]]; ` +
+          `shutil.copy(hf_hub_download(\\"willdepueoai/parameter-golf\\", \\"fineweb_1024_bpe.model\\", subfolder=\\"datasets/tokenizers\\", repo_type=\\"dataset\\"), ` +
+            `\\"${tier2.tokenizerPath}\\"); ` +
+          'print(\\"DOWNLOAD_DONE\\")"',
         `ls -la ${tier2.dataPath}/ && ls -la ${tier2.tokenizerPath}`,
       ].join(' && '), 600_000)
       console.log(setupOutput.slice(-500))
-      // Upload tokenizer if not found on pod
-      const tokCheck = await client.executeCommand(podId, `[ -f ${tier2.tokenizerPath} ] && echo TOK_EXISTS || echo TOK_MISSING`, 10_000)
-      if (tokCheck.includes('TOK_MISSING')) {
-        console.log('Uploading tokenizer (250KB)...')
-        // Upload binary file via base64 heredoc directly
-        const tokB64 = fs.readFileSync('packages/parameter-golf/data/tokenizers/fineweb_1024_bpe.model').toString('base64')
-        await client.executeCommand(podId,
-          `stty -echo 2>/dev/null\ncat > /tmp/tok.b64 << 'CGOLF_EOF'\n${tokB64}\nCGOLF_EOF\nbase64 -d /tmp/tok.b64 > ${tier2.tokenizerPath} && rm /tmp/tok.b64 && stty echo 2>/dev/null && echo TOK_UPLOADED $(wc -c < ${tier2.tokenizerPath}) bytes`,
-          120_000)
-        console.log('Tokenizer uploaded.')
+      if (!setupOutput.includes('DOWNLOAD_DONE')) {
+        console.log('WARNING: Dataset download may have failed')
       }
       console.log('Dataset ready on pod.')
     }
